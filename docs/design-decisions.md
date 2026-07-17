@@ -344,3 +344,53 @@ admit more borderline candidates.
 population, it's that its weights are *derived*, not guessed — defensible without hand-waving
 even when performance is a statistical tie. Worth revisiting at the Phase 14 scale run, where
 the candidate population is ~1000x larger and may include more genuinely ambiguous pairs.
+
+## Crosswalk: an id can belong to at most one cluster per run
+
+**Phase:** 7
+**Decision:** `crosswalk.resolve_crosswalk()` processes clusters in a deterministic order
+(sorted by each cluster's smallest member record_key) and tracks which existing
+`patient_global_id`s have already been claimed this run. If a later cluster's only
+overlapping existing id was already claimed by an earlier cluster, that id is treated as
+unavailable — the later cluster mints fresh (or merges among whatever other ids remain
+available), and the departure is logged as a `split`.
+**What was wrong with the first version:** The initial implementation resolved each cluster
+independently — "does this cluster's members have an existing id? reuse it." Two *different*,
+now-disconnected clusters that both used to share one old id would each independently see
+"exactly one existing id" and both reuse it, silently applying the same `patient_global_id`
+to two disconnected groups of records in the same run. That's not a split — a split becoming
+invisible is arguably worse than not detecting it, since it would `LEFT JOIN` in the serving
+layer as if nothing happened. Caught by actually reasoning through a "record moved" idempotency
+scenario before writing the test, not by a failing test after the fact.
+**Why claiming-order determinism, not e.g. largest-subgroup-wins:** Ties back to the same
+principle used everywhere else in this codebase (dbt clustering by phonetic key, generator
+sharding, survivorship's tiebreak): pick the rule that's cheap to state and impossible to get
+inconsistent results from. Sorting by smallest member `record_key` is arbitrary but total and
+stable — two runs over identical input always claim ids in the same order, satisfying P6.
+**Merge and split are mutually exclusive per id, per run:** A cluster that gains an id through
+merging never also logs a split for the ids it retired (those are exactly the `MERGE` events);
+split is reserved for ids that lose members without a merge explaining where they went. An
+earlier draft double-logged both for the same transition — pure noise, since the merge event
+already says everything the split event would have.
+
+## Pipeline-level NaN sanitization, not another per-field guard
+
+**Phase:** 7
+**Decision:** `pipeline.py` added `_sanitize_nan()`, converting every `float('nan')`/`NaT`
+value to `None` immediately after `DataFrame.to_dict()`, once, at the point pandas data enters
+the matching pipeline. `comparators.is_missing()` (Phase 6 fix, now exported instead of
+private) is reused directly by `survivorship.py`'s candidate filter.
+**What happened:** The exact same pandas-silently-produces-NaN failure mode fixed once in
+`comparators.py` (Phase 6) reappeared immediately in `pipeline.py` — `golden_record["ssn_last4"]
+= ssn[-4:] if ssn else None` crashed with `TypeError: 'float' object is not subscriptable`
+the first time `run_matching` actually ran against real data, because `survive_field`'s own
+null-filter (`m.get(field_name) not in (None, "")`) had the identical blind spot to `compare_ssn`'s
+original bug.
+**Why sanitize at the boundary this time, instead of only hardening each function again:**
+Chasing this class of bug function-by-function doesn't converge — every new pure function that
+touches pandas-sourced data is a new place for it to hide. Fixing it once where pandas data
+*enters* the system (immediately after `to_dict`) means every downstream pure function
+(comparators, survivorship, and whatever Phase 8+ adds) can simply trust `None` as the only
+"missing" representation. `survivorship.py` was also hardened directly with `is_missing()` as
+defense-in-depth — belt and suspenders, since a future caller that skips `_sanitize_nan` should
+still get correct behavior, not a silent miscount.

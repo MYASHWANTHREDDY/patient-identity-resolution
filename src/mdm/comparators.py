@@ -22,7 +22,7 @@ DEFAULT_NEAR_THRESHOLD = 0.90
 DEFAULT_SIMILAR_THRESHOLD = 0.80
 
 
-def _is_missing(value: Any) -> bool:
+def is_missing(value: Any) -> bool:
     """None, '', float('nan'), and pandas NaT are all "absent" -- `not value` alone isn't
     enough because `not float('nan')` is False (NaN is truthy in Python). Pandas
     round-trips (e.g. DataFrame.to_dict) silently turn a SQL NULL into NaN/NaT instead of
@@ -63,7 +63,7 @@ def compare_name(
     """Robert/Bob has Jaro-Winkler ~= 0.5 -- indistinguishable from a different name. No
     threshold recovers that; it needs the nickname lookup checked before falling back to
     similarity (PROJECT_CONSTITUTION.md #11.3)."""
-    if _is_missing(a) or _is_missing(b):
+    if is_missing(a) or is_missing(b):
         return "missing"
     if a == b:
         return "exact"
@@ -85,7 +85,7 @@ def compare_name(
 def compare_dob(a: date | None, b: date | None) -> str:
     """`transposed` exists because day/month transposition is a systematic error, not a
     random one -- collapsing it into "different" throws away a strong signal."""
-    if _is_missing(a) or _is_missing(b):
+    if is_missing(a) or is_missing(b):
         return "missing"
     if a == b:
         return "exact"
@@ -101,7 +101,7 @@ def compare_dob(a: date | None, b: date | None) -> str:
 
 
 def compare_ssn(a: str | None, b: str | None) -> str:
-    if _is_missing(a) or _is_missing(b):
+    if is_missing(a) or is_missing(b):
         return "missing"
     return "exact" if a == b else "different"
 
@@ -109,6 +109,6 @@ def compare_ssn(a: str | None, b: str | None) -> str:
 def compare_gender(a: str | None, b: str | None) -> str:
     """Gender is a weak signal -- two random people agree ~50% of the time. U (unknown) is
     treated as missing, not as a value to compare (PROJECT_CONSTITUTION.md #11.3)."""
-    if _is_missing(a) or _is_missing(b) or a == "U" or b == "U":
+    if is_missing(a) or is_missing(b) or a == "U" or b == "U":
         return "missing"
     return "exact" if a == b else "different"

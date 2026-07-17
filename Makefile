@@ -1,4 +1,4 @@
-.PHONY: install install-dev lint format test data data-dev data-ci dbt-build evaluate estimate-params
+.PHONY: install install-dev lint format test data data-dev data-ci dbt-build evaluate estimate-params match
 
 TIER ?= dev
 SEED ?= 42
@@ -38,6 +38,9 @@ evaluate:
 
 estimate-params:
 	python scripts/estimate_fs_params.py --tier $(TIER)
+
+match:
+	python scripts/run_matching.py --tier $(TIER)
 
 # `demo` and other pipeline-driving targets are added as the phases that implement them
 # land (see PROJECT_CONSTITUTION.md #19). Nothing here claims a capability that doesn't
