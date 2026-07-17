@@ -1,0 +1,37 @@
+version: 2
+
+models:
+  - name: patient_normalized
+    description: >
+      Layer 2 conformance: one unified row per source record. Dates parsed, gender
+      standardized, names cleaned, phonetic keys precomputed. No de-duplication yet --
+      source_vendor + source_record_id keep lineage back to Layer 1.
+    columns:
+      - name: record_key
+        description: "{vendor}:{record_id} -- the global record identifier."
+        tests:
+          - unique
+          - not_null
+      - name: source_vendor
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["VENDOR_A", "VENDOR_B", "VENDOR_C"]
+      - name: source_record_id
+        tests:
+          - not_null
+      - name: first_name
+        tests:
+          - not_null
+      - name: last_name
+        tests:
+          - not_null
+      - name: dob
+        tests:
+          - not_null
+      - name: gender
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["M", "F", "U"]

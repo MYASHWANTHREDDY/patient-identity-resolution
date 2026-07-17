@@ -20,7 +20,3 @@ models:
     conformance:
       +schema: conformance
       +materialized: table
-    blocking:
-      +schema: matching
-    serving:
-      +schema: serving

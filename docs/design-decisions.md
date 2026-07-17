@@ -130,3 +130,36 @@ conformance. Keeping that boundary in the local backend too is what makes Phase 
 the dbt target to BigQuery) a target change, not a re-architecture — `upload_to_gcs.py` +
 BigQuery load jobs will do locally what `load_local.py` does now, and dbt's `sources.yml`
 doesn't change either way.
+
+## Hand-rolled SOUNDEX for DuckDB, without regex backreferences
+
+**Phase:** 3
+**Decision:** `dbt/macros/phonetic_key.sql` dispatches to native `SOUNDEX()` on BigQuery, and to
+a hand-rolled equivalent on DuckDB (map letters to digit classes via `translate()`, collapse
+adjacent duplicate codes, drop the first letter's own code, strip zeros, pad/truncate to 3
+digits). The collapse step uses plain literal `replace()` calls (7 digits × 3 nested passes),
+not `regexp_replace(..., '(.)\1+', '\1', 'g')`.
+**Alternatives considered:** The doc's own sketch macro assumed DuckDB ships a `soundex()`
+function (it doesn't, as of dbt-duckdb 1.10 / duckdb 1.5 — confirmed directly). The regex-
+backreference version was tried first and is *arguably* more readable; it computes correct
+results standalone but throws `Invalid Input Error: invalid escape sequence: \1` specifically
+once nested inside dbt's compiled `CREATE TABLE AS`, reproduced independently of dbt via the
+raw DuckDB Python driver. Not chasing the internal cause given a straightforward,
+regex-free alternative exists.
+**Why this:** Verified against the doc's own worked example — `soundex('SMITH')` and
+`soundex('SMTIH')` both resolve to `'S530'` on the DuckDB branch, matching native BigQuery
+SOUNDEX's behavior for the same inputs. That's what blocking (Phase 5) actually depends on:
+the two branches don't need to be bit-identical in general, only to agree on the
+transposition case they exist to survive.
+
+## `try_strptime` / `SAFE.PARSE_DATE`, never a parse that can throw
+
+**Phase:** 3
+**Decision:** `dbt/macros/parse_vendor_date.sql` uses DuckDB's `try_strptime(...)::DATE` and
+BigQuery's `SAFE.PARSE_DATE(...)` — both return `NULL` on a malformed date instead of failing
+the query.
+**Alternatives considered:** `strptime()` / `PARSE_DATE()` without the `try_`/`SAFE.` variants.
+**Why this:** Directly the Layer 1 -> Layer 2 contract the constitution calls "the single most
+useful property of the layering" (§5): a malformed date must become a data quality finding
+(`dob IS NULL` downstream, catchable by a dbt test) rather than crash the whole conformance
+build over one bad row.

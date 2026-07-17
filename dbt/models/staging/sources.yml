@@ -1,0 +1,13 @@
+version: 2
+
+sources:
+  - name: raw_standard
+    description: >
+      Layer 1. Vendor data as received, loaded with no transform (a free BigQuery load job,
+      or DuckDB read_parquet locally -- see mdm.backends.local). Dates are STRING, in each
+      vendor's own format.
+    schema: raw_standard
+    tables:
+      - name: vendor_a
+      - name: vendor_b
+      - name: vendor_c
