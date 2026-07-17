@@ -1,0 +1,54 @@
+# Kept local-only for now — user will decide later whether it goes to GitHub.
+PROJECT_CONSTITUTION.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Env / secrets
+.env
+*.key.json
+service-account*.json
+
+# Generated data — the seeded generator is the artifact, not its output (P3, anti-patterns)
+data/
+*.parquet
+*.duckdb
+
+# dbt
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+dbt/profiles.yml
+
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/.terraform.lock.hcl
+
+# Airflow
+airflow/logs/
+airflow/*.db
+
+# Docs generated artifacts
+docs/results.md
+docs/img/*.png
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Test / coverage
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage

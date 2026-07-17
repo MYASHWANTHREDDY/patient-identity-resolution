@@ -1,0 +1,51 @@
+# Single source of truth for tunable pipeline behavior. Nothing tunable lives in Python (P5).
+# See PROJECT_CONSTITUTION.md #16 for the full rationale behind each section.
+
+tiers:
+  ci:    { num_identities: 2400,    target_records: 5000,    backend: duckdb, dbt_target: dev }
+  dev:   { num_identities: 24000,   target_records: 50000,   backend: duckdb, dbt_target: dev }
+  scale: { num_identities: 2400000, target_records: 5000000, backend: spark,  dbt_target: prod }
+
+# Sections below are declared now so the schema is stable across phases, but are only
+# consumed starting at the phase noted in each comment.
+
+blocking:  # Phase 5
+  passes:
+    - { name: bp_ssn,        keys: [ssn],        skip_if_null: true }
+    - { name: bp_dob_lname,  keys: [dob, last_name_phonetic] }
+    - { name: bp_year_names, keys: [dob_year, first_name_phonetic, last_name_phonetic] }
+    - { name: bp_coarse,     keys: [last_name_phonetic, gender, dob_decade] }
+  max_block_size: 1000
+
+comparators:  # Phase 4
+  name:
+    near_threshold: 0.90
+    similar_threshold: 0.80
+    nickname_table: config/nicknames.yml
+
+scoring:  # Phase 6
+  method: fellegi_sunter
+  params_file: config/fs_params.yml
+
+thresholds:  # Phase 6
+  upper: 12.0
+  lower: 2.0
+
+clustering:  # Phase 7
+  max_cluster_size: 6
+  min_cluster_density: 0.6
+
+survivorship:  # Phase 7
+  rule_chain: [vendor_trust, plurality, completeness, recency, deterministic]
+  vendor_trust:
+    dob:        [VENDOR_A, VENDOR_C, VENDOR_B]
+    first_name: [VENDOR_A, VENDOR_B, VENDOR_C]
+    last_name:  [VENDOR_A, VENDOR_B, VENDOR_C]
+    ssn:        [VENDOR_A, VENDOR_B]
+    gender:     [VENDOR_A, VENDOR_B, VENDOR_C]
+
+gcp:  # Phase 10+
+  project: ${GCP_PROJECT}
+  region: ${GCP_REGION}
+  raw_bucket: ${GCP_PROJECT}-mdm-raw
+  max_bytes_billed: 21474836480
