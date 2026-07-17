@@ -1,0 +1,26 @@
+name: "mdm"
+version: "1.0.0"
+config-version: 2
+profile: "mdm"
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+test-paths: ["tests"]
+clean-targets: ["target", "dbt_packages"]
+
+vars:
+  max_block_size: 1000
+
+models:
+  mdm:
+    staging:
+      +schema: conformance
+      +materialized: view
+    conformance:
+      +schema: conformance
+      +materialized: table
+    blocking:
+      +schema: matching
+    serving:
+      +schema: serving

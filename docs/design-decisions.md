@@ -103,3 +103,30 @@ against Vendor C (no SSN field at all), `dob_error` transposition on a day > 12 
 `nickname` for a row that was actually untouched (no table match), `evaluate.py`'s later
 recall-by-noise-type breakdown would be quietly wrong in a way that's invisible without reading
 generator internals. Reporting reality here, not intent, is what keeps that breakdown honest.
+
+## Literal dbt schema names via `generate_schema_name`, not dbt's default prefix behavior
+
+**Phase:** 2
+**Decision:** `dbt/macros/generate_schema_name.sql` overrides dbt's default macro so a model's
+`schema` config (`conformance`, `matching`, `serving`, `quality`) becomes the literal DuckDB
+schema / BigQuery dataset name, instead of dbt's usual `{target_schema}_{custom_schema}`.
+**Alternatives considered:** dbt's default behavior (`dev_conformance`, `dev_matching`, ...).
+**Why this:** §9 of the constitution defines fixed dataset names — `conformance`,
+`matching`, `serving`, `quality` — that must mean the same thing addressed the same way on
+DuckDB and BigQuery. dbt's default prefixing is designed for multi-developer schema isolation,
+which isn't a concern here; it would just make every dataset name target-dependent for no
+benefit and break the "one codebase, two backends" parity this project is built around (P8).
+
+## `raw_standard` is a dbt source, not a dbt model
+
+**Phase:** 2
+**Decision:** `scripts/load_local.py` / `mdm.backends.local.load_tier_to_duckdb()` loads
+generated Parquet directly into `raw_standard.vendor_{a,b,c}` via DuckDB's `read_parquet()`,
+with no transformation. dbt will declare these as `source()`s (Phase 3), never `CREATE`s them.
+**Alternatives considered:** A dbt seed or an initial dbt model that reads the Parquet.
+**Why this:** Mirrors the real architecture the constitution describes: "BigQuery load jobs,
+free, no transform" (§7) populate `raw_standard` outside of dbt; dbt's job starts at
+conformance. Keeping that boundary in the local backend too is what makes Phase 11 (swapping
+the dbt target to BigQuery) a target change, not a re-architecture — `upload_to_gcs.py` +
+BigQuery load jobs will do locally what `load_local.py` does now, and dbt's `sources.yml`
+doesn't change either way.

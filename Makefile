@@ -20,12 +20,15 @@ test:
 
 data:
 	python scripts/generate.py --tier $(TIER) --seed $(SEED)
+	python scripts/load_local.py --tier $(TIER)
 
 data-dev:
 	python scripts/generate.py --tier dev --seed $(SEED)
+	python scripts/load_local.py --tier dev
 
 data-ci:
 	python scripts/generate.py --tier ci --seed $(SEED)
+	python scripts/load_local.py --tier ci
 
 # `demo` and other pipeline-driving targets are added as the phases that implement them
 # land (see PROJECT_CONSTITUTION.md #19). Nothing here claims a capability that doesn't
