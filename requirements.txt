@@ -1,3 +1,7 @@
 # Runtime dependencies, added as each phase actually uses them (no speculative pins).
 # Phase 0: config loading.
 PyYAML==6.0.2
+
+# Phase 1: synthetic data generation.
+Faker==33.1.0
+pyarrow==18.1.0
