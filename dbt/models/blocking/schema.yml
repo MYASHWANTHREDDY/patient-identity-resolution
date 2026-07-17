@@ -1,0 +1,38 @@
+version: 2
+
+models:
+  - name: block_keys
+    description: "One row per (record_key, blocking_pass, block_key) -- the unpivoted blocking keys."
+    columns:
+      - name: record_key
+        tests:
+          - not_null
+      - name: blocking_pass
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["bp_ssn", "bp_dob_lname", "bp_year_names", "bp_coarse"]
+      - name: block_key
+        tests:
+          - not_null
+
+  - name: block_stats
+    description: "Block size distribution per pass -- the skew analysis."
+    columns:
+      - name: record_count
+        tests:
+          - not_null
+
+  - name: candidate_pairs
+    description: "Blocking's raw output: one row per (candidate pair, pass that found it)."
+    columns:
+      - name: record_key_a
+        tests:
+          - not_null
+      - name: record_key_b
+        tests:
+          - not_null
+      - name: block_key
+        tests:
+          - not_null

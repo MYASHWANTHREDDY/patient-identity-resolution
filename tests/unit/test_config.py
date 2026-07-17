@@ -1,6 +1,15 @@
+import re
+
 import pytest
 
-from mdm.config import DEFAULT_CONFIG_PATH, VALID_TIERS, ConfigError, load_config, resolve_tier
+from mdm.config import (
+    DEFAULT_CONFIG_PATH,
+    REPO_ROOT,
+    VALID_TIERS,
+    ConfigError,
+    load_config,
+    resolve_tier,
+)
 
 
 def test_default_config_file_loads():
@@ -51,3 +60,17 @@ def test_resolve_tier_missing_required_key_raises():
     broken_config = {"tiers": {"dev": {"num_identities": 100}}}
     with pytest.raises(ConfigError):
         resolve_tier("dev", broken_config)
+
+
+def test_dbt_max_block_size_matches_config():
+    """dbt/dbt_project.yml's max_block_size default must agree with
+    config/matching.yml's blocking.max_block_size -- dbt can't read our Python-loaded
+    config directly, so this is the drift guard (see docs/design-decisions.md)."""
+    config_value = load_config()["blocking"]["max_block_size"]
+
+    dbt_project_text = (REPO_ROOT / "dbt" / "dbt_project.yml").read_text(encoding="utf-8")
+    match = re.search(r"env_var\('MDM_MAX_BLOCK_SIZE',\s*'(\d+)'\)", dbt_project_text)
+    assert match, "Could not find MDM_MAX_BLOCK_SIZE default in dbt/dbt_project.yml"
+    dbt_default_value = int(match.group(1))
+
+    assert dbt_default_value == config_value

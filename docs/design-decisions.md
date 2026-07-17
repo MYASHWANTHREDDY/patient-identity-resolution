@@ -198,3 +198,32 @@ this cardinality and not investigated further at this phase.
 pattern again — it's SSN coverage, not a scoring bug. This is exactly the kind of thing
 Fellegi-Sunter (Phase 6) is supposed to improve on by using near/similar name and DOB
 agreement instead of requiring exact string equality.
+
+## Measured Pair Completeness is 0.9533 at dev tier, short of the 0.98 target — and why
+
+**Phase:** 5
+**Decision:** No code decision — a measured shortfall against §12's target, worth recording
+precisely so it isn't mistaken for a bug on a future read, and so the explanation survives
+follow-up (P4).
+**What was measured:** At `dev` tier, unioned blocking gets RR = 0.999729 and PC = 0.9533
+against the four passes specified in `config/matching.yml` / PROJECT_CONSTITUTION.md #5 (all
+four exactly as documented — `bp_ssn`, `bp_dob_lname`, `bp_year_names`, `bp_coarse`). 1,355 of
+29,012 true pairs are found by none of the four passes; 88% of those (1,193) are `typo_name`
+pairs, the rest mostly `multiple` (both sides corrupted).
+**Why:** Three of the four passes — `bp_dob_lname`, `bp_year_names`, `bp_coarse` — all key
+partly on `last_name_phonetic`. When a `typo_name` corruption lands on the last name and
+happens to shift its Soundex code (confirmed directly: one missed pair has
+`last_name_phonetic` `Y620` on one side and `Y260` on the other), all three fail
+*simultaneously* — they don't fail independently, so the multi-pass union doesn't help here
+the way it does for other corruption types. The fourth pass, `bp_ssn`, could rescue it, but
+only when SSN is present on both sides — and Vendor C never has an SSN field at all
+(PROJECT_CONSTITUTION.md #8). A last-name typo landing on any pair that includes a Vendor C
+appearance is structurally unblockable by this exact 4-pass design.
+**How to apply:** This is a real, explainable ceiling on this specific pass design, not a bug —
+don't "fix" it by quietly padding results. The clean fix would be a 5th pass keyed on
+`first_name_phonetic` + `dob` (independent of last name entirely), which would rescue exactly
+this failure mode; not added here because it would diverge from the 4-pass architecture as
+specifically diagrammed in PROJECT_CONSTITUTION.md #5 and #16. Tracked as future work, in the
+same spirit as Double Metaphone and address matching (§23). Re-measure at the Phase 14 scale
+run — pass selectivity and skew both change at 5M in ways that could shift this number either
+direction.

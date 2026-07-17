@@ -15,6 +15,11 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
+from mdm.blocking_metrics import (
+    all_pairs_from_block_keys,
+    blocking_metrics_by_pass,
+    pair_completeness,
+)
 from mdm.config import REPO_ROOT, VALID_TIERS
 from mdm.deterministic import deterministic_match_pairs
 
@@ -82,17 +87,26 @@ def recall_by_noise_type(
     }
 
 
+def load_pair_noise_type(db_path: Path) -> dict[PairKey, str]:
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        ground_truth = con.execute(
+            "SELECT record_key, true_identity_id, noise_type FROM ground_truth.ground_truth"
+        ).df()
+    finally:
+        con.close()
+    return true_pairs_with_noise_type(ground_truth)
+
+
 def run_baseline_evaluation(tier: str, db_path: Path) -> dict:
     con = duckdb.connect(str(db_path), read_only=True)
     try:
         patient_normalized = con.execute(
             "SELECT record_key, first_name, last_name, dob, ssn FROM conformance.patient_normalized"
         ).df()
-        ground_truth = con.execute(
-            "SELECT record_key, true_identity_id, noise_type FROM ground_truth.ground_truth"
-        ).df()
     finally:
         con.close()
+    pair_noise_type = load_pair_noise_type(db_path)
 
     started = time.monotonic()
     predicted_df = deterministic_match_pairs(patient_normalized)
@@ -101,7 +115,6 @@ def run_baseline_evaluation(tier: str, db_path: Path) -> dict:
     predicted_pairs: set[PairKey] = set(
         zip(predicted_df["record_key_a"], predicted_df["record_key_b"], strict=False)
     )
-    pair_noise_type = true_pairs_with_noise_type(ground_truth)
     true_pairs = set(pair_noise_type)
 
     metrics = _pair_metrics(predicted_pairs, true_pairs)
@@ -117,7 +130,37 @@ def run_baseline_evaluation(tier: str, db_path: Path) -> dict:
     }
 
 
-def render_results_md(result: dict) -> str:
+def run_blocking_evaluation(tier: str, db_path: Path, true_pairs: set[PairKey]) -> dict:
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        num_records = con.execute("SELECT count(*) FROM conformance.patient_normalized").fetchone()[
+            0
+        ]
+        candidate_pairs_df = con.execute(
+            "SELECT record_key_a, record_key_b, blocking_pass FROM matching.candidate_pairs"
+        ).df()
+        block_keys_df = con.execute(
+            "SELECT record_key, blocking_pass, block_key FROM matching.block_keys"
+        ).df()
+    finally:
+        con.close()
+
+    by_pass = blocking_metrics_by_pass(candidate_pairs_df, true_pairs, num_records)
+
+    uncapped_pairs = all_pairs_from_block_keys(block_keys_df)
+    uncapped_pc = pair_completeness(uncapped_pairs, true_pairs)
+
+    return {
+        "tier": tier,
+        "num_records": num_records,
+        "by_pass": by_pass,
+        "uncapped_pair_completeness": uncapped_pc,
+        "capped_pair_completeness": by_pass["unioned"]["pair_completeness"],
+        "pair_completeness_cost_of_cap": uncapped_pc - by_pass["unioned"]["pair_completeness"],
+    }
+
+
+def render_results_md(result: dict, blocking_result: dict | None = None) -> str:
     m = result["metrics"]
     lines = [
         "# Results",
@@ -153,6 +196,31 @@ def render_results_md(result: dict) -> str:
             f"{stats['recall']:.4f} |"
         )
     lines.append("")
+
+    if blocking_result is not None:
+        lines += [
+            f"## Blocking ({blocking_result['tier']} tier)",
+            "",
+            f"- Records: {blocking_result['num_records']}",
+            "",
+            "| Pass | Candidate pairs | Reduction ratio | Pair completeness |",
+            "|---|---|---|---|",
+        ]
+        for pass_name, stats in blocking_result["by_pass"].items():
+            lines.append(
+                f"| {pass_name} | {stats['candidate_pairs']} | "
+                f"{stats['reduction_ratio']:.6f} | {stats['pair_completeness']:.4f} |"
+            )
+        lines += [
+            "",
+            "### Cost of the block size cap",
+            "",
+            f"- Pair completeness with cap: {blocking_result['capped_pair_completeness']:.4f}",
+            f"- Pair completeness without cap: {blocking_result['uncapped_pair_completeness']:.4f}",
+            f"- Cost of the cap: {blocking_result['pair_completeness_cost_of_cap']:.4f}",
+            "",
+        ]
+
     return "\n".join(lines)
 
 
@@ -161,19 +229,33 @@ def main(argv: list[str] | None = None) -> dict:
     parser.add_argument("--tier", choices=VALID_TIERS, default="dev")
     parser.add_argument("--db-path", type=Path, default=None)
     parser.add_argument("--out", type=Path, default=REPO_ROOT / "docs" / "results.md")
+    parser.add_argument(
+        "--skip-blocking",
+        action="store_true",
+        help="Skip blocking metrics (requires dbt build to have populated the matching schema).",
+    )
     args = parser.parse_args(argv)
 
     db_path = args.db_path or (REPO_ROOT / "data" / args.tier / "mdm.duckdb")
     result = run_baseline_evaluation(args.tier, db_path)
 
+    blocking_result = None
+    if not args.skip_blocking:
+        true_pairs = set(load_pair_noise_type(db_path))
+        blocking_result = run_blocking_evaluation(args.tier, db_path, true_pairs)
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(render_results_md(result), encoding="utf-8")
+    args.out.write_text(render_results_md(result, blocking_result), encoding="utf-8")
 
     m = result["metrics"]
     print(
         f"tier={args.tier} precision={m['precision']:.4f} recall={m['recall']:.4f} "
         f"f1={m['f1']:.4f} -> {args.out}"
     )
+    if blocking_result:
+        pc = blocking_result["by_pass"]["unioned"]["pair_completeness"]
+        rr = blocking_result["by_pass"]["unioned"]["reduction_ratio"]
+        print(f"blocking: reduction_ratio={rr:.6f} pair_completeness={pc:.4f}")
     return result
 
 

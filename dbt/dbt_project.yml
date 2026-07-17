@@ -10,7 +10,11 @@ test-paths: ["tests"]
 clean-targets: ["target", "dbt_packages"]
 
 vars:
-  max_block_size: 1000
+  # Overridable at invocation (`dbt build --vars '{max_block_size: 500}'` or
+  # MDM_MAX_BLOCK_SIZE env var) so a reviewer can change it without editing Python or dbt
+  # YAML (P5). Must match config/matching.yml's blocking.max_block_size -- kept in sync by
+  # tests/unit/test_config.py::test_dbt_max_block_size_matches_config.
+  max_block_size: "{{ env_var('MDM_MAX_BLOCK_SIZE', '1000') }}"
 
 models:
   mdm:
@@ -20,3 +24,5 @@ models:
     conformance:
       +schema: conformance
       +materialized: table
+    blocking:
+      +schema: matching
