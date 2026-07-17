@@ -227,3 +227,120 @@ specifically diagrammed in PROJECT_CONSTITUTION.md #5 and #16. Tracked as future
 same spirit as Double Metaphone and address matching (§23). Re-measure at the Phase 14 scale
 run — pass selectivity and skew both change at 5M in ways that could shift this number either
 direction.
+
+## Bug: NaN silently misread as "different" instead of "missing" in every comparator
+
+**Phase:** 6
+**Decision:** Added `_is_missing()` to `comparators.py` — checks `value is None`, then
+`value != value` (true only for NaN and pandas `NaT`, the "not equal to itself" trick, chosen
+so the comparator module stays pandas-free per P8), then `value == ""`. All four comparators
+now call it instead of a bare `not value` truthiness check.
+**How it was found:** `scripts/estimate_fs_params.py`'s first real run produced nonsensical
+m/u estimates — `ssn.different` at m≈0.70 (SSN essentially never repeats between two records
+of the same person, so this should be near-zero) and `ssn.missing` at m≈0.00003 (should be
+the dominant level, since Vendor C never has SSN at all). Traced to
+`DataFrame.set_index(...).to_dict(orient="index")`: pandas silently turns a SQL NULL into
+`float('nan')` during that row-wise conversion instead of leaving it `None`. `not float('nan')`
+evaluates to `False` in Python (NaN is truthy), so `compare_ssn`'s `if not a or not b` never
+caught it — execution fell through to `a == b`, which is `False` for NaN against anything
+(including itself), landing on `"different"`. A missing field was scored as active
+disagreement instead of contributing zero weight — exactly backwards from the Fellegi-Sunter
+design in #11.4 ("an uncomparable field contributes exactly zero weight rather than a
+disagreement penalty").
+**Why the fix lives in the comparators, not the caller:** P8 requires the comparators to be
+pure and backend-agnostic. Fixing only `load_records_by_key`'s pandas conversion would leave
+every other caller (Spark, a future match API) exposed to the same class of bug if it hands
+comparators a different null sentinel. Regression tests cover NaN and a duck-typed `NaT`-like
+object (`test_comparators.py`).
+**Re-verified after the fix:** `ssn.different` weight is now **-13.49 bits** (strong evidence
+*against* a match — SSN disagreement is close to disqualifying) and `ssn.missing` is **+0.22
+bits** (near-neutral, as expected: missingness is driven mostly by Vendor C coverage, which is
+only slightly more common among true-match pairs than random ones in this noise model). Both
+numbers are now explainable; before the fix, neither was.
+
+## m/u for structurally-impossible levels land at ≈ -0.54 bits, not exactly 0
+
+**Phase:** 6
+**Decision:** No code decision — correcting an earlier (wrong) prediction in this document,
+now that real numbers exist.
+**What was predicted (Phase 4 entry, before this data existed):** That "missing" agreement
+would land at ≈0 bits across the board because missingness should be equally likely under
+both the true-match and non-match hypotheses.
+**What was actually measured:** True for genuinely-populated levels (`ssn.missing` = +0.22
+bits, see above). But levels that structurally *never occur* in either sample — `last_name`
+`nickname` (nicknames only ever land on first names in this generator), any field's `missing`
+level where the field is never actually absent — settle at **exactly -0.5365 to -0.5366
+bits**, not 0. Cause: `m` is Laplace-smoothed over 29,012 true pairs, `u` over a 20,000-pair
+sample — different denominators. A level with zero observed count in *both* samples gets
+`m_floor = 1/(29012+6)` and `u_floor = 1/(20000+6)`, and `log2(m_floor/u_floor) ≈ -0.54`
+regardless of which field or level it is. It's a fixed artifact of the smoothing floors, not
+signal.
+**How to apply:** A weight near -0.54 bits with `m` and `u` both at or near their smoothing
+floor means "never observed," not "weak negative evidence" — read the `m`/`u` values in
+`config/fs_params.yml` alongside the weight before interpreting it. Equalizing `m`/`u` sample
+sizes would remove the artifact but isn't worth the complexity here — no candidate pair should
+realistically land on one of these levels anyway.
+
+## Validated: gender agreement really is worth "about one bit," as predicted
+
+**Phase:** 6
+**Decision:** No code decision — recording a clean validation of the constitution's own
+prediction (§22 talking points: "gender agreement is worth about one bit").
+**What was measured:** `gender.exact` weight = **1.026 bits** at `dev` tier. `gender.different`
+= -13.85 bits (strong negative — two records disagreeing on gender essentially rules out a
+match in this data, since gender is generated deterministically per identity and never
+independently corrupted).
+**How to apply:** Good evidence the estimation pipeline is producing sane numbers — a
+prediction made before any code existed came out almost exactly right once real data ran
+through it.
+
+## `find_thresholds` clamps `lower` to never exceed `upper`
+
+**Phase:** 6
+**Decision:** `threshold_sweep.find_thresholds()` computes `upper` (lowest score meeting the
+precision target) and `lower` (highest score meeting the recall target) independently, then
+clamps `lower = min(lower, upper)` before returning.
+**What was found:** On the real dev-tier candidate-pair population, the independent
+computation produced `upper=7.8924` and `lower=21.0092` — `lower > upper`. Root cause isn't a
+bug in either target individually: this scorer separates true from non-matches so cleanly
+that precision stays >= 0.99 down to a fairly low score (few false positives creep in until
+then), while recall already hits >= 0.99 at a much higher score (almost all true matches
+score very high, so excluding everything below 21 barely costs any recall). Both facts are
+correct; naively combining them crosses. Left unclamped, this silently breaks
+`triage.decide()`, which checks `score >= upper` first — a `lower` above `upper` becomes dead
+code and the review band silently evaporates (confirmed: review queue count was exactly 0
+before understanding why, and remained 0 after the clamp — but now for an explained reason
+instead of a hidden one).
+**Why this fix, not e.g. swapping or averaging:** Clamping preserves `upper`'s meaning exactly
+(the precision-driven auto-match line doesn't move) and collapses the review band to
+zero-width exactly where the two targets stop overlapping — the mathematically minimal
+correction. A regression test (`test_find_thresholds_never_returns_lower_above_upper`)
+guards `lower <= upper` as an invariant regardless of input.
+**How to apply:** A zero-width review band is a legitimate outcome when a scorer separates
+classes cleanly on the candidate-pair population — not evidence of a bug by itself. Check
+`upper` vs `lower` before assuming something's wrong; they should differ only when there's a
+genuine reachable middle ground between the two targets.
+
+## Fellegi-Sunter and the naive scorer land within 0.0001 F1 of each other
+
+**Phase:** 6
+**Decision:** No code decision — a measured result that complicates the "F-S beats naive"
+narrative the framework would predict, worth recording precisely.
+**What was measured:** Best achievable F1 across all thresholds, over the full candidate-pair
+population (345,976 pairs from blocking) at dev tier: Fellegi-Sunter 0.9963, naive
+(hand-tuned weights) 0.9962. The PR curves (`docs/img/pr_curve.png`) are visually
+indistinguishable.
+**Why they tie:** Blocking already did most of the discriminating work before either scorer
+sees a pair. Within the candidate-pair population specifically (not all possible pairs),
+agreement patterns cluster at the extremes — mostly-everything-agrees or
+mostly-everything-disagrees — with little genuinely ambiguous middle ground. When the
+population is that separable, almost any reasonable monotonic combination of comparator
+agreement levels ranks pairs correctly, so a hand-tuned weighting and a data-derived one
+converge to nearly the same ranking. The two scorers would very likely diverge more on a
+harder population — pairs deliberately sampled to be ambiguous, or blocking passes that
+admit more borderline candidates.
+**How to apply:** Don't claim F-S "wins" here — it doesn't, measurably. The honest framing
+(consistent with §11.4's own argument) is that F-S's real advantage isn't raw F1 on this
+population, it's that its weights are *derived*, not guessed — defensible without hand-waving
+even when performance is a statistical tie. Worth revisiting at the Phase 14 scale run, where
+the candidate population is ~1000x larger and may include more genuinely ambiguous pairs.

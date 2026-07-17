@@ -42,7 +42,8 @@ airflow/*.db
 docs/results.md
 docs/img/*.png
 
-# Editors / OS
+# Editors / OS / tooling
+.claude/
 .vscode/
 .idea/
 .DS_Store

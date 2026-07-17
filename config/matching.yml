@@ -27,9 +27,15 @@ scoring:  # Phase 6
   method: fellegi_sunter
   params_file: config/fs_params.yml
 
+# Empirically tuned via threshold_sweep (`python -m mdm.evaluate`), not by taste
+# (PROJECT_CONSTITUTION.md #11.5). Measured at dev tier: this noise model separates true
+# from non-matches cleanly enough within blocking's candidate-pair population that
+# precision >= 0.99 and recall >= 0.99 are both satisfied from the same cutoff -- the
+# review band collapses to zero-width here. See docs/design-decisions.md. Re-run the
+# sweep and update these if fs_params.yml or the noise model changes.
 thresholds:  # Phase 6
-  upper: 12.0
-  lower: 2.0
+  upper: 7.8924
+  lower: 7.8924
 
 clustering:  # Phase 7
   max_cluster_size: 6

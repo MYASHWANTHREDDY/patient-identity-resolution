@@ -10,6 +10,8 @@ from mdm.comparators import (
     compare_ssn,
 )
 
+NAN = float("nan")
+
 NICKNAME_TABLE = {"ROBERT": ["BOB", "BOBBY", "ROB"], "WILLIAM": ["BILL", "WILL"]}
 NICKNAME_INDEX = build_nickname_index(NICKNAME_TABLE)
 
@@ -94,3 +96,43 @@ def test_compare_ssn_levels(a, b, expected):
 )
 def test_compare_gender_levels(a, b, expected):
     assert compare_gender(a, b) == expected
+
+
+# Regression: pandas round-trips (DataFrame.to_dict) can silently turn a SQL NULL into
+# float('nan') instead of None. `not float('nan')` is False, so a naive truthiness check
+# on comparator input let NaN slip past the missing-check and get compared with `==`,
+# which is always False for NaN -- silently reclassifying "missing" as "different"
+# (found via a real Vendor C pair in scripts/estimate_fs_params.py output; see #8).
+def test_compare_name_treats_nan_as_missing():
+    assert compare_name(NAN, "SMITH") == "missing"
+    assert compare_name("SMITH", NAN) == "missing"
+    assert compare_name(NAN, NAN) == "missing"
+
+
+def test_compare_ssn_treats_nan_as_missing():
+    assert compare_ssn(NAN, "123456789") == "missing"
+    assert compare_ssn("123456789", NAN) == "missing"
+
+
+def test_compare_gender_treats_nan_as_missing():
+    assert compare_gender(NAN, "M") == "missing"
+
+
+def test_compare_dob_treats_nan_and_nat_like_values_as_missing():
+    assert compare_dob(NAN, date(1980, 1, 1)) == "missing"
+
+    class FakeNaT:
+        """Stands in for pandas.NaT without adding a pandas dependency to this test --
+        NaT's defining property is that it is not equal to itself."""
+
+        def __eq__(self, other):
+            return False
+
+        def __ne__(self, other):
+            return True
+
+    assert compare_dob(FakeNaT(), date(1980, 1, 1)) == "missing"
+
+
+def test_compare_dob_still_works_normally_after_the_nan_fix():
+    assert compare_dob(date(1980, 1, 1), date(1980, 1, 1)) == "exact"
