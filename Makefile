@@ -1,4 +1,4 @@
-.PHONY: install install-dev lint format test data data-dev data-ci
+.PHONY: install install-dev lint format test data data-dev data-ci dbt-build evaluate
 
 TIER ?= dev
 SEED ?= 42
@@ -29,6 +29,12 @@ data-dev:
 data-ci:
 	python scripts/generate.py --tier ci --seed $(SEED)
 	python scripts/load_local.py --tier ci
+
+dbt-build:
+	DBT_PROFILES_DIR=dbt DUCKDB_PATH=data/$(TIER)/mdm.duckdb dbt build --project-dir dbt --profiles-dir dbt --target dev
+
+evaluate:
+	python -m mdm.evaluate --tier $(TIER)
 
 # `demo` and other pipeline-driving targets are added as the phases that implement them
 # land (see PROJECT_CONSTITUTION.md #19). Nothing here claims a capability that doesn't

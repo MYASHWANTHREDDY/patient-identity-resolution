@@ -163,3 +163,38 @@ the query.
 useful property of the layering" (§5): a malformed date must become a data quality finding
 (`dob IS NULL` downstream, catchable by a dbt test) rather than crash the whole conformance
 build over one bad row.
+
+## Deterministic baseline as vectorized self-merges, not O(n^2) pairwise comparison
+
+**Phase:** 4
+**Decision:** `deterministic_match_pairs()` computes the SSN-exact and name+dob-exact rules as
+`pandas.merge` self-joins on the key columns, not a pairwise scan or the Phase 5 blocking
+infrastructure.
+**Alternatives considered:** Reusing blocking (not built yet at Phase 4); `itertools.combinations`
+over grouped records.
+**Why this:** Both deterministic rules are literally equi-joins — group by the key, pair up
+everyone in the same group. That's what `merge` does natively and vectorized; no candidate-pair
+generation or blocking is needed for exact-match rules at all, at any scale, which is also why
+Stage 1 (§11.1) is listed before Stage 2 (blocking) in the matching methodology.
+
+## Measured baseline recall is ~33% on corrupted fields, not near-zero, because of SSN
+
+**Phase:** 4
+**Decision:** No code decision here — a measured result worth recording so it isn't
+re-derived from scratch later, and so the number doesn't look like a bug on first read.
+**What was measured:** At `dev` tier, deterministic recall is 100% for `exact` and
+`missing_ssn` pairs (expected — neither noise type touches name/DOB, and `missing_ssn` still
+leaves name+DOB exactly matching), but ~33% — not ~0% — for `typo_name`, `dob_error`, and
+`nickname` pairs, where only the name or DOB field was corrupted.
+**Why:** A noise type corrupts exactly one field per record; SSN survives untouched on a
+`typo_name`/`dob_error`/`nickname` record unless that appearance happens to be on
+`VENDOR_C` (which carries no SSN field at all). Each identity's appearances land on 2 of 3
+vendors uniformly; a pair avoids `VENDOR_C` on both sides in exactly 1 of the 3 possible vendor
+pairs `{A,B}, {A,C}, {B,C}` — 1/3 ≈ 33%, matching the measured ~32–33% almost exactly. Overall
+precision is 0.9999 (2 false positives out of 15,463 predicted pairs at `dev` tier) —
+coincidental SSN or name+DOB collisions between different synthetic identities, plausible at
+this cardinality and not investigated further at this phase.
+**How to apply:** Don't be surprised if a future re-read of `docs/results.md` shows this
+pattern again — it's SSN coverage, not a scoring bug. This is exactly the kind of thing
+Fellegi-Sunter (Phase 6) is supposed to improve on by using near/similar name and DOB
+agreement instead of requiring exact string equality.
