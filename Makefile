@@ -1,4 +1,4 @@
-.PHONY: install install-dev lint format test data data-dev data-ci dbt-build-pre dbt-build evaluate estimate-params match quality-checks pipeline dashboard demo tf-plan tf-apply tf-destroy upload-gcs
+.PHONY: install install-dev lint format test data data-dev data-ci dbt-build-pre dbt-build evaluate estimate-params match quality-checks pipeline dashboard demo tf-plan tf-apply tf-destroy upload-gcs load-bigquery dbt-build-prod verify-parity
 
 TIER ?= dev
 SEED ?= 42
@@ -76,5 +76,18 @@ tf-destroy:
 	cd terraform && terraform destroy
 
 BUCKET ?= $(shell cd terraform && terraform output -raw raw_bucket_name 2>/dev/null)
+PROJECT ?= $(shell cd terraform && terraform output -raw project_id 2>/dev/null)
+
 upload-gcs:
 	python scripts/upload_to_gcs.py --tier $(TIER) --bucket $(BUCKET)
+
+# Phase 11: dbt against real BigQuery. load-bigquery requires upload-gcs to have run first
+# (raw_standard loads from the bucket, not local disk).
+load-bigquery:
+	python scripts/load_bigquery.py --tier $(TIER) --project $(PROJECT) --bucket $(BUCKET)
+
+dbt-build-prod:
+	cd dbt && DBT_PROFILES_DIR=. GCP_PROJECT=$(PROJECT) GCP_REGION=us-central1 dbt build --target prod --exclude path:models/serving snap_member_demographics
+
+verify-parity:
+	python scripts/verify_tier_parity.py --tier $(TIER) --project $(PROJECT)

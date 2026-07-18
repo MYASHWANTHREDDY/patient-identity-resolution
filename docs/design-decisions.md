@@ -574,3 +574,34 @@ dataset actually lives. `'US'` was a reasonable-looking placeholder written in P
 any real infrastructure existed to check it against — Phase 10 is the first point this default
 could actually be verified, and it was wrong. `GCP_REGION` still overrides it, so this only
 matters for whoever runs `prod` without setting it explicitly.
+
+## BigQuery's native SOUNDEX doesn't match the textbook algorithm — switched to one hand-rolled algorithm on both targets
+
+**Phase:** 11
+**Decision:** `phonetic_key()` no longer dispatches to BigQuery's native `SOUNDEX()`. The
+same hand-rolled algorithm from Phase 3 (originally written only because DuckDB lacks a
+native Soundex) now runs on **both** targets, verified byte-identical via `TRANSLATE`/
+`SUBSTR`/`RPAD`/`REPLACE` — all four behave identically on DuckDB and BigQuery.
+**What was found:** Phase 11's actual parity check (`scripts/verify_tier_parity.py`) against
+the same 50k dev-tier input showed `conformance.patient_normalized` and
+`matching.candidate_pairs` diverging — 398,507 candidate pairs on DuckDB vs. 421,049 on
+BigQuery. Traced to a single root cause: `SOUNDEX('SANCHEZ')` returns `'S522'` from the
+hand-rolled algorithm (and matches manually tracing the textbook American Soundex algorithm
+by hand) but `'S520'` from BigQuery's native `SOUNDEX()`. BigQuery doesn't document its exact
+Soundex implementation closely enough to reverse-engineer with confidence, so matching it
+byte-for-byte wasn't a tractable goal — Phase 3's own note ("the two branches don't need to be
+bit-identical in general") turned out to be too permissive once Phase 11 actually needed
+identical blocking behavior across tiers, not just agreement on one hand-picked test case.
+**Why this fix over accepting the divergence:** P8 states divergence between tiers is a
+defect, and Phase 11's stated exit criterion is identical results, not "close enough" results.
+Using the *same* logic on both engines — rather than each engine's own native function —
+is the only way to *guarantee* identical output by construction instead of hoping two
+different implementations happen to agree. This is a stronger version of the pattern already
+used for `strip_non_digits`/`as_string`/`null_string`: prefer portable, explicitly-shared SQL
+over relying on native functions whose exact behavior isn't fully specified.
+**How to apply:** Re-verified end to end: rebuilt both targets, re-ran
+`scripts/verify_tier_parity.py`, both `patient_normalized` (50,486 rows) and
+`candidate_pairs` (398,507 rows) now match exactly. If a future native BigQuery function is
+tempting for performance reasons, check whether it's precisely spec'd before trusting it to
+agree with a hand-rolled or other-engine equivalent — "same name" does not imply "same
+algorithm."

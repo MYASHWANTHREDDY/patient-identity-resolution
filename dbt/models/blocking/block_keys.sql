@@ -17,21 +17,21 @@ with bp_ssn as (
 
 bp_dob_lname as (
     select record_key, 'bp_dob_lname' as blocking_pass,
-        cast(dob as varchar) || '|' || last_name_phonetic as block_key
+        {{ as_string('dob') }} || '|' || last_name_phonetic as block_key
     from {{ ref('patient_normalized') }}
     where dob is not null and last_name_phonetic is not null
 ),
 
 bp_year_names as (
     select record_key, 'bp_year_names' as blocking_pass,
-        cast(dob_year as varchar) || '|' || first_name_phonetic || '|' || last_name_phonetic as block_key
+        {{ as_string('dob_year') }} || '|' || first_name_phonetic || '|' || last_name_phonetic as block_key
     from {{ ref('patient_normalized') }}
     where dob_year is not null and first_name_phonetic is not null and last_name_phonetic is not null
 ),
 
 bp_coarse as (
     select record_key, 'bp_coarse' as blocking_pass,
-        last_name_phonetic || '|' || gender || '|' || cast(dob_decade as varchar) as block_key
+        last_name_phonetic || '|' || gender || '|' || {{ as_string('dob_decade') }} as block_key
     from {{ ref('patient_normalized') }}
     where last_name_phonetic is not null and gender is not null and dob_decade is not null
 )
