@@ -1,4 +1,4 @@
-.PHONY: install install-dev lint format test data data-dev data-ci dbt-build evaluate estimate-params match
+.PHONY: install install-dev lint format test data data-dev data-ci dbt-build-pre dbt-build evaluate estimate-params match quality-checks pipeline
 
 TIER ?= dev
 SEED ?= 42
@@ -30,6 +30,13 @@ data-ci:
 	python scripts/generate.py --tier ci --seed $(SEED)
 	python scripts/load_local.py --tier ci
 
+# dbt runs in two passes: serving/* sources are tables scripts/run_matching.py writes,
+# so they don't exist until after `match` has run at least once (see
+# docs/design-decisions.md, "two-phase dbt flow"). dbt-build-pre builds conformance +
+# blocking only; the plain dbt-build (after `match`) builds everything, serving included.
+dbt-build-pre:
+	DBT_PROFILES_DIR=dbt DUCKDB_PATH=data/$(TIER)/mdm.duckdb dbt build --project-dir dbt --profiles-dir dbt --target dev --exclude path:models/serving snap_member_demographics
+
 dbt-build:
 	DBT_PROFILES_DIR=dbt DUCKDB_PATH=data/$(TIER)/mdm.duckdb dbt build --project-dir dbt --profiles-dir dbt --target dev
 
@@ -41,6 +48,12 @@ estimate-params:
 
 match:
 	python scripts/run_matching.py --tier $(TIER)
+
+quality-checks:
+	python scripts/run_quality_checks.py --tier $(TIER)
+
+# The full local pipeline, in order. Each step depends on the previous one's output.
+pipeline: data dbt-build-pre estimate-params match dbt-build evaluate quality-checks
 
 # `demo` and other pipeline-driving targets are added as the phases that implement them
 # land (see PROJECT_CONSTITUTION.md #19). Nothing here claims a capability that doesn't

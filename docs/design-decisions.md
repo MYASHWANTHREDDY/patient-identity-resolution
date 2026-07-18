@@ -394,3 +394,61 @@ touches pandas-sourced data is a new place for it to hide. Fixing it once where 
 "missing" representation. `survivorship.py` was also hardened directly with `is_missing()` as
 defense-in-depth — belt and suspenders, since a future caller that skips `_sanitize_nan` should
 still get correct behavior, not a silent miscount.
+
+## A real false merge, found by inspection: two different people, one Faker name collision
+
+**Phase:** 7 (found while spot-checking `serving.member_360` in Phase 8)
+**Decision:** No code decision — a genuine false merge in the dev-tier output, worth
+recording precisely rather than quietly re-running with a different seed until it disappears.
+**What was found:** `PGID000000008946` merged 5 records into one golden record
+("ANGELA RICE", 1970), but ground truth shows they're two different people:
+`ID00005001` (3 records, DOB 1970-01-28/30) and `ID00012826` (2 records, DOB 1970-11-13) --
+a Faker first+last name collision across two distinct synthetic identities, plus a shared
+birth year.
+**How it happened:** `VENDOR_A:00012826`/`VENDOR_B:00012826` carry a real SSN, present and
+different from `ID00005001`'s SSN -- that disagreement is strong evidence against a match
+(-13.49 bits, Phase 6) and should have kept the two identities apart directly. The bridge was
+`VENDOR_C:00005001`, which has no SSN at all (Vendor C structurally never does). Against that
+record, SSN disagreement can't fire -- it scores `missing` (+0.22 bits, near-neutral) instead
+of `different` (-13.49 bits), while name (`near`, "ANELA" vs "ANGELA") and DOB (`year_only`,
+same year) both contribute positive weight. That's enough alone to auto-match
+`VENDOR_C:00005001` to the `ID00012826` side, chaining two otherwise well-separated identities
+into one cluster through the one connecting record that couldn't contradict it.
+**Why the density guard didn't catch it:** This is exactly the transitive-closure failure mode
+§13.2 names as "the most dangerous failure mode" -- but a 5-member cluster with several direct
+edges among the true sub-groups still clears `min_cluster_density = 0.6` even with one bridging
+edge doing the work of connecting two real clusters. The guard catches sparse chains; this one
+wasn't sparse enough.
+**How to apply:** This is the honest, unforced version of the "worst false positive" the
+constitution's own talking points ask for (§22) -- found by reading `member_360` output, not
+manufactured. Don't paper over it: a real MDM system would route a bridging record with no
+SSN and only `near`/`year_only` agreement to clerical review rather than auto-match, which
+argues for a per-edge confidence check in clustering (not just per-cluster density) as future
+work, alongside the already-noted first_name+dob blocking pass (Phase 5 entry above).
+
+## dbt runs in two passes, not one, once the serving layer exists
+
+**Phase:** 8
+**Decision:** The pipeline invokes `dbt build` twice: once for conformance + blocking
+(`--exclude path:models/serving snap_member_demographics`) *before*
+`scripts/run_matching.py`, and again, unrestricted, *after* it. The Makefile's `pipeline`
+target encodes this as `data -> dbt-build-pre -> estimate-params -> match -> dbt-build ->
+evaluate -> quality-checks`.
+**What broke first:** Adding `dbt/models/serving/sources.yml` (declaring `serving.crosswalk`,
+`serving.member_demographics`, etc. as sources with schema tests) made every *existing*
+integration test's single `dbt build` call start failing — those tables don't exist until
+Python's `run_matching()` creates them, and dbt's source tests run against whatever the
+source config says exists, so `dbt build` on a fresh database errors on `Catalog Error: Table
+... does not exist` before it ever reaches `run_matching`. The snapshot
+(`snap_member_demographics`, a distinct dbt resource type from `models/`) has the identical
+dependency and needed its own exclusion.
+**Why this is the correct shape, not a workaround:** It matches the architecture as diagrammed
+in PROJECT_CONSTITUTION.md #5 — `SURV --> SRV` (survivorship writes serving tables) happens
+*before* `SRV --> DBT4[dbt: serving views + snapshots]`. dbt genuinely owns two disjoint
+phases of this pipeline (conformance/blocking before matching; serving views/tests/snapshot
+after), not one. Trying to force a single `dbt build` invocation to cover both was the actual
+bug — the fix is sequencing, not loosening a test.
+**How to apply:** Any new dbt source or model that reads a Python-written table needs to land
+in the *second* pass. If a future model needs both a Python-written table and a dbt-only
+upstream (like `patient_normalized`), it belongs in `models/serving/` and gets excluded from
+the pre-matching build alongside everything else there.

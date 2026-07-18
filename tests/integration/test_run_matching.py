@@ -67,6 +67,11 @@ def _build_ci_tier_db(tmp_path: Path) -> tuple[Path, dict, dict[str, str]]:
             str(profiles_dir),
             "--target",
             "dev",
+            # serving/* sources are tables run_matching() is about to write -- not
+            # present yet. See docs/design-decisions.md, two-phase dbt flow.
+            "--exclude",
+            "path:models/serving",
+            "snap_member_demographics",
         ],
         cwd=REPO_ROOT,
         env=env,

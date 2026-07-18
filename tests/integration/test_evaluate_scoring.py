@@ -66,6 +66,11 @@ def test_scoring_evaluation_end_to_end(tmp_path):
             str(profiles_dir),
             "--target",
             "dev",
+            # serving/* sources are tables scripts/run_matching.py writes -- not present
+            # yet on a fresh database. See docs/design-decisions.md, two-phase dbt flow.
+            "--exclude",
+            "path:models/serving",
+            "snap_member_demographics",
         ],
         cwd=REPO_ROOT,
         env=env,

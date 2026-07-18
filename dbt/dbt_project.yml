@@ -26,3 +26,9 @@ models:
       +materialized: table
     blocking:
       +schema: matching
+    serving:
+      +schema: serving
+
+snapshots:
+  mdm:
+    +schema: snapshots

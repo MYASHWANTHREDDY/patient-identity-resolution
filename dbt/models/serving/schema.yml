@@ -1,0 +1,21 @@
+version: 2
+
+models:
+  - name: dim_member
+    description: "Serving view over the golden record + membership size."
+    columns:
+      - name: patient_global_id
+        tests:
+          - unique
+          - not_null
+
+  - name: member_360
+    description: "Golden record + every alternate identifier + a field_lineage row count."
+    columns:
+      - name: patient_global_id
+        tests:
+          - unique
+          - not_null
+
+  - name: agg_dedup_metrics
+    description: "Dashboard-facing aggregates (Phase 9 Overview tab): one row per build."

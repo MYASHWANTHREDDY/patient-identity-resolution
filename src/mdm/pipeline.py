@@ -17,7 +17,7 @@ from mdm.crosswalk import CrosswalkEntry, resolve_crosswalk
 from mdm.scoring import compare_record_pair, score_fs
 from mdm.survivorship import FIELDS as SURVIVORSHIP_FIELDS
 from mdm.survivorship import build_golden_record
-from mdm.triage import AUTO_MATCH, decide
+from mdm.triage import AUTO_MATCH, REVIEW, decide
 
 _PGID_PATTERN = re.compile(r"^PGID(\d+)$")
 
@@ -94,6 +94,7 @@ def run_matching(
         _sanitize_nan(records_by_key)
 
         auto_match_edges = []
+        review_pairs = []
         for record_key_a, record_key_b in zip(
             candidate_pairs["record_key_a"], candidate_pairs["record_key_b"], strict=False
         ):
@@ -103,8 +104,11 @@ def run_matching(
                 nickname_index=nickname_index,
             )
             score = score_fs(agreement, fs_params)
-            if decide(score, upper=thresholds["upper"], lower=thresholds["lower"]) == AUTO_MATCH:
+            decision = decide(score, upper=thresholds["upper"], lower=thresholds["lower"])
+            if decision == AUTO_MATCH:
                 auto_match_edges.append((record_key_a, record_key_b))
+            elif decision == REVIEW:
+                review_pairs.append((record_key_a, record_key_b, score))
 
         clusters = build_clusters(
             auto_match_edges,
@@ -134,12 +138,15 @@ def run_matching(
             field_lineage_rows,
             alternate_ids,
             membership_rows,
+            review_pairs,
+            run_id,
         )
 
         return {
             "run_id": run_id,
             "num_records": len(records_by_key),
             "num_auto_match_edges": len(auto_match_edges),
+            "num_review_pairs": len(review_pairs),
             "num_clusters": len(clusters),
             "num_flagged_clusters": sum(1 for c in clusters if c.flagged),
             "num_golden_records": len(golden_records),
@@ -201,6 +208,8 @@ def _write_tables(
     field_lineage_rows,
     alternate_ids,
     membership_rows,
+    review_pairs,
+    run_id,
 ):
     crosswalk_df = pd.DataFrame(
         [
@@ -275,6 +284,25 @@ def _write_tables(
     membership_df = pd.DataFrame(membership_rows)
     con.register("membership_df", membership_df)
     con.execute("CREATE OR REPLACE TABLE serving.membership AS SELECT * FROM membership_df")
+
+    review_columns = ["record_key_a", "record_key_b", "score", "status", "run_id"]
+    if review_pairs:
+        review_df = pd.DataFrame(
+            [
+                {
+                    "record_key_a": a,
+                    "record_key_b": b,
+                    "score": score,
+                    "status": "pending",
+                    "run_id": run_id,
+                }
+                for a, b, score in review_pairs
+            ]
+        )
+    else:
+        review_df = pd.DataFrame(columns=review_columns)
+    con.register("review_df", review_df)
+    con.execute("CREATE OR REPLACE TABLE serving.review_queue AS SELECT * FROM review_df")
 
 
 def _load_fs_params() -> dict:

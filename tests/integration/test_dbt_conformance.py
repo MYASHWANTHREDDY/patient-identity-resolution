@@ -63,6 +63,12 @@ def test_dbt_build_ci_tier_conformance(tmp_path):
             str(profiles_dir),
             "--target",
             "dev",
+            # serving/* sources are tables scripts/run_matching.py writes -- they don't
+            # exist yet on a fresh database, so this build (conformance + blocking only)
+            # must exclude them. See docs/design-decisions.md on the two-phase dbt flow.
+            "--exclude",
+            "path:models/serving",
+            "snap_member_demographics",
         ],
         cwd=REPO_ROOT,
         env=env,

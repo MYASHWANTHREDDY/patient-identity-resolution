@@ -1,0 +1,81 @@
+version: 2
+
+sources:
+  - name: serving_written
+    description: >
+      Layer 3 tables written directly by src/mdm/pipeline.py (crosswalk resolution,
+      clustering, survivorship) -- not dbt models. dbt builds read-only views and
+      aggregates on top (dim_member, member_360, agg_dedup_metrics) and enforces the
+      structural quality gates in #14 against them.
+    schema: serving
+    tables:
+      - name: crosswalk
+        columns:
+          - name: record_key
+            tests:
+              - unique
+              - not_null
+          - name: patient_global_id
+            tests:
+              - not_null
+      - name: identity_events
+        columns:
+          - name: event_type
+            tests:
+              - accepted_values:
+                  arguments:
+                    values: ["create", "merge", "split"]
+      - name: membership
+        columns:
+          - name: patient_global_id
+            tests:
+              - unique
+              - not_null
+      - name: member_demographics
+        columns:
+          - name: patient_global_id
+            tests:
+              - unique
+              - not_null
+              - relationships:
+                  arguments:
+                    to: source('serving_written', 'membership')
+                    field: patient_global_id
+          - name: first_name
+            tests:
+              - not_null
+          - name: last_name
+            tests:
+              - not_null
+          - name: dob
+            tests:
+              - not_null
+          - name: gender
+            tests:
+              - accepted_values:
+                  arguments:
+                    values: ["M", "F", "U"]
+      - name: member_alternate_identifier
+        columns:
+          - name: patient_global_id
+            tests:
+              - not_null
+              - relationships:
+                  arguments:
+                    to: source('serving_written', 'membership')
+                    field: patient_global_id
+      - name: field_lineage
+        columns:
+          - name: patient_global_id
+            tests:
+              - not_null
+      - name: review_queue
+        description: >
+          Gray-zone candidate pairs (lower <= score < upper) -- models how real MDM
+          handles uncertainty. Never auto-merged; status starts 'pending'.
+        columns:
+          - name: status
+            tests:
+              - accepted_values:
+                  arguments:
+                    values: ["pending", "confirmed", "rejected"]
