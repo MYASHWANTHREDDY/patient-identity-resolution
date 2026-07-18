@@ -23,3 +23,6 @@ streamlit==1.59.2
 
 # Phase 11: dbt BigQuery target.
 dbt-bigquery==1.12.0
+
+# Phase 12: Spark scoring on Dataproc Serverless.
+pyspark==4.2.0

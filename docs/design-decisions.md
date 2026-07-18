@@ -605,3 +605,126 @@ over relying on native functions whose exact behavior isn't fully specified.
 tempting for performance reasons, check whether it's precisely spec'd before trusting it to
 agree with a hand-rolled or other-engine equivalent — "same name" does not imply "same
 algorithm."
+
+## pandas 3.0's new string dtype silently corrupts to the literal string "nan" through PySpark's legacy pandas-to-Spark conversion — fixed the test harness, not the backend
+
+**Phase:** 12
+**Decision:** The local Spark/pandas parity test (`spark_local_test.py`, not part of the
+shipped codebase) now seeds Spark by writing pyarrow Parquet files and having Spark read
+them with `spark.read.parquet(...)`, instead of calling `spark.createDataFrame(pandas_df)`
+directly. `src/mdm/backends/spark.py` itself required no code change.
+**What was found:** An initial parity run showed the Spark-scored and locally-scored
+(pandas-loop) Fellegi-Sunter scores disagreeing on most pairs involving Vendor C (which has
+no SSN field), with Spark's score consistently ~13.7 points lower — exactly the gap between
+the `ssn` field's `missing` weight (+0.22) and `different` weight (-13.49) in
+`config/fs_params.yml`. Debug prints traced this to the joined Spark row itself:
+`'b_ssn': 'nan'` — a genuine, non-null, non-empty 4-character *string* `"nan"`, not a null.
+`compare_ssn` correctly judged `"117326729" != "nan"` as `different`, since a literal string
+`"nan"` is not covered by `is_missing()`'s NaN/None/empty-string checks (nor should it be —
+treating any real string "nan" as missing would be a worse, more surprising rule than the bug
+it works around). The corruption traced further back to `spark.createDataFrame(pandas_df)`:
+pyspark 4.2.0 emits `FutureWarning: PySpark does not yet fully support pandas >= 3.0.0`, and
+under pandas 3.0's new native string dtype, the missing-SSN sentinel gets `str()`-coerced to
+the literal text `"nan"` during Spark's legacy (non-Arrow) fallback conversion path, rather
+than being preserved as SQL NULL.
+**Why this is a test-harness fix, not a backend fix:** The real Dataproc Serverless job never
+calls `spark.createDataFrame(pandas_df)` — it reads `candidate_pairs`/`patient_normalized`
+directly from BigQuery via the Spark BigQuery connector, which produces native Spark
+DataFrames with correct null semantics from the start. The bug only existed in how the local
+test constructed its **input** Spark DataFrame; `mapInPandas`'s own Arrow-based batch
+boundary (`backends/spark.py`'s actual code path) was never implicated — re-running the
+identical scoring logic against Parquet-sourced input produced 0/5,000 mismatches.
+**How to apply:** Confirmed via `spark_local_test.py`: local pandas-loop and Spark
+`mapInPandas` scores now match exactly on all 5,000 sampled dev-tier pairs. When testing
+Spark code locally against pandas-seeded data on this pandas/pyspark version combination,
+prefer writing to Parquet and reading it back over `spark.createDataFrame(pandas_df)` — it's
+both closer to how the real job ingests data (from BigQuery, not from in-memory pandas) and
+avoids this dtype-conversion trap entirely.
+
+## Local dry-run Spark drivers write output via toPandas()/pandas, not Spark's own Parquet writer
+
+**Phase:** 12
+**Decision:** `spark_jobs/score_pairs.py` and `spark_jobs/cluster_identities.py`'s
+`--local-parquet-dir` dry-run branch writes output with `df.toPandas().to_parquet(...)`
+instead of `df.write.parquet(...)`. The real (BigQuery-writing) branch is unaffected.
+**What was found:** Wiring up the actual submittable driver scripts (as opposed to the
+scratchpad parity-test harness, which only ever used `.toPandas()` to compare results and
+never wrote Spark output to disk) hit a new failure the moment it tried to *write* a Parquet
+file locally: `RawLocalFileSystem.setPermission` → `Shell.getWinUtilsPath` →
+`FileNotFoundException: HADOOP_HOME and hadoop.home.dir are unset`, thrown as a hard
+`RuntimeException` inside the Hadoop output committer. This looked at first like a repeat of
+the session's earlier `SparkSession` bootstrap issues (same exception text), but isolating it
+with a series of shrinking repros showed `SparkSession.builder(...).getOrCreate()` alone
+always succeeded -- the failure only appeared once a real `.write.parquet(...)` call ran.
+Root cause: reading Parquet on Windows never touches Hadoop's local filesystem permission
+code at all, but *writing* goes through Hadoop's `FileOutputCommitter`, which calls
+`RawLocalFileSystem.setPermission()` to chmod the output directory -- and that call requires
+`winutils.exe`, a Windows-only stub binary this project never installs (see the existing WARN
+about missing `winutils.exe`, present but harmless in every prior Spark test in this phase
+until something actually tried to write).
+**Why this is a local-test-only fix:** The real Dataproc Serverless job runs Linux (no
+winutils.exe concept exists there) and writes its actual output to BigQuery via the
+spark-bigquery-connector, never to local disk via Hadoop's `FileOutputCommitter` -- so this
+code path is never exercised in production regardless. Installing `winutils.exe` (a
+third-party unsigned binary) purely to satisfy a Windows-only local dry-run path wasn't worth
+the trade-off; routing local output through pandas' own (pyarrow-backed, Hadoop-free)
+Parquet writer sidesteps the problem entirely while still exercising the real, shared
+`score_candidate_pairs`/`build_clusters` logic end to end.
+**How to apply:** Verified via `spark_jobs/score_pairs.py --local-parquet-dir`: writes 5,000
+scored pairs successfully. If a future local Spark test needs to *write* files (not just
+read), reach for `.toPandas().to_parquet(...)` rather than `.write.parquet(...)` on Windows
+unless `HADOOP_HOME`/`winutils.exe` are set up.
+
+## Real Dataproc Serverless submission: three real fixes before it ran, then exact parity
+
+**Phase:** 12
+**Decision:** Ship rapidfuzz as a pre-downloaded Linux wheel (`scripts/package_spark.py` /
+`dist/rapidfuzz.zip`) rather than any Dataproc-side pip-install mechanism; grant the pipeline
+service account `roles/bigquery.readSessionUser` in addition to its existing BigQuery roles;
+stage all `--py-files`/`--files` inputs to GCS manually (`gsutil cp`) rather than passing
+local paths to `gcloud dataproc batches submit`.
+**What was found, in the order hit:**
+1. `--py-files=dist/mdm.zip` (a local path) failed at driver startup with `Illegal character
+   in path at index 43: gs://.../dependencies\mdm.zip` -- gcloud's Windows build joins its
+   internal GCS staging path with a backslash, producing an invalid URI. Uploading the file
+   myself with `gsutil cp` and passing the resulting `gs://` URI directly sidesteps gcloud's
+   local-file staging path entirely.
+2. `ModuleNotFoundError: No module named 'rapidfuzz'` -- the Dataproc Serverless base image
+   doesn't include it (unlike PyYAML, which was already present and needed no extra step).
+   Guessed two different `--properties` keys for a pip-install-at-startup mechanism
+   (`spark.dataproc.driverEnv.PIP_PACKAGES`, then `dataproc.pip.packages`) -- both were
+   silently accepted by the CLI and silently ignored by the runtime ("Ignoring non-Spark
+   config property"), each guess costing a real (if small, since both failed within
+   seconds) Dataproc bill. `dataproc:pip.packages` (colon, not dot) turned out to be a
+   **persistent-cluster** property, not documented anywhere as working for serverless
+   batches. Stopped guessing against a billed environment and instead downloaded rapidfuzz's
+   actual Linux wheel locally (`pip download rapidfuzz==3.14.5 --platform
+   manylinux_2_28_x86_64 --python-version 312 --abi cp312 --only-binary=:all:` -- Dataproc
+   runtime 2.2 uses Python 3.12, and rapidfuzz 3.14.5 only ships a manylinux_2_27/2_28
+   wheel, not the older manylinux2014/glibc-2.17 baseline pip defaults to expecting) and
+   shipped the wheel file directly as a second `--py-files` entry -- a wheel's internal
+   layout (package importable from its own zip root) is already exactly what `--py-files`
+   wants from a `.zip`, no repackaging needed.
+3. The job then read `conformance.patient_normalized` and `matching.candidate_pairs`, scored
+   all pairs, and only failed at the very last step (`BigQueryWriteHelper.
+   writeDataFrameToBigQuery`) with `PERMISSION_DENIED: ... 'bigquery.readsessions.create'`.
+   The service account's existing `bigquery.dataEditor` + `bigquery.jobUser` roles cover
+   table read/write and job execution, but not BigQuery Storage API read sessions, which the
+   spark-bigquery-connector's indirect write path also needs for its read-back step.
+   `roles/bigquery.readSessionUser` is the narrowest predefined role that grants exactly
+   that permission.
+**Real result, once all three were fixed:** `score-pairs-20260718-023905` succeeded in ~2
+minutes, wrote 345,976 scored pairs to `matching.pair_scores` (the correct *distinct*
+candidate-pair count -- `matching.candidate_pairs` itself has 398,507 raw rows because
+multi-pass blocking can rediscover the same pair via more than one blocking key, and both
+the local pipeline and this Spark job already deduplicate via `SELECT DISTINCT`/`.distinct()`
+before scoring, exactly as they should). A full re-verification -- not a sample -- scored
+all 345,976 pairs locally in pandas and diffed against every row BigQuery actually holds:
+**0 mismatches, max absolute difference 0.0.** Approximate cost for the successful run:
+~0.23 DCU-hours + ~23 GB-hours shuffle storage, on the order of $0.25; combined with the
+earlier failed attempts (each failing within seconds, before real compute), total spend for
+this phase's real Dataproc work was well under $1, drawn from the GCP free-trial credit.
+**How to apply:** `make dataproc-score-pairs` reproduces the whole working flow end to end
+(package → upload deps → submit). If a future package needs bundling the same way, check its
+wheel's actual platform tag on PyPI first (`manylinux_2_17` a.k.a. manylinux2014 is not
+guaranteed for newer package releases) rather than assuming the classic baseline tag.

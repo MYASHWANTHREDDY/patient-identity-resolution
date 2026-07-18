@@ -68,3 +68,33 @@ resource "google_project_iam_member" "pipeline_storage" {
   role    = "roles/storage.objectAdmin"
   member  = "serviceAccount:${google_service_account.pipeline.email}"
 }
+
+# Phase 12: Dataproc Serverless batches need their own API enabled (unlike BigQuery/Storage,
+# which come enabled by default on a new project) and a worker role for whichever service
+# account actually runs the batch. `--service-account` on `gcloud dataproc batches submit`
+# points at this same pipeline SA rather than the project's default Compute Engine SA, so
+# the batch's runtime identity is the same least-privilege SA already scoped to exactly the
+# BigQuery/GCS access the job needs -- one identity for the whole pipeline, not a second one
+# with its own, wider default permissions.
+resource "google_project_service" "dataproc" {
+  project            = var.project_id
+  service            = "dataproc.googleapis.com"
+  disable_on_destroy = false # portfolio project: don't fight terraform destroy over an API flag
+}
+
+resource "google_project_iam_member" "pipeline_dataproc_worker" {
+  project = var.project_id
+  role    = "roles/dataproc.worker"
+  member  = "serviceAccount:${google_service_account.pipeline.email}"
+}
+
+# The spark-bigquery-connector reads (and, for its "indirect" write path, reads back)
+# through the BigQuery Storage API, which needs bigquery.readsessions.create -- a
+# permission `bigquery.dataEditor`/`bigquery.jobUser` don't include (discovered the hard
+# way: a real batch got all the way through scoring 398k pairs and only failed at the
+# final write, see docs/design-decisions.md, Phase 12).
+resource "google_project_iam_member" "pipeline_bigquery_read_session_user" {
+  project = var.project_id
+  role    = "roles/bigquery.readSessionUser"
+  member  = "serviceAccount:${google_service_account.pipeline.email}"
+}

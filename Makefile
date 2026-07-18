@@ -1,4 +1,4 @@
-.PHONY: install install-dev lint format test data data-dev data-ci dbt-build-pre dbt-build evaluate estimate-params match quality-checks pipeline dashboard demo tf-plan tf-apply tf-destroy upload-gcs load-bigquery dbt-build-prod verify-parity
+.PHONY: install install-dev lint format test data data-dev data-ci dbt-build-pre dbt-build evaluate estimate-params match quality-checks pipeline dashboard demo tf-plan tf-apply tf-destroy upload-gcs load-bigquery dbt-build-prod verify-parity package-spark upload-spark-deps dataproc-score-pairs dataproc-cluster-identities
 
 TIER ?= dev
 SEED ?= 42
@@ -91,3 +91,34 @@ dbt-build-prod:
 
 verify-parity:
 	python scripts/verify_tier_parity.py --tier $(TIER) --project $(PROJECT)
+
+# Phase 12: Spark scoring/clustering on Dataproc Serverless (the project's main cost driver
+# -- see docs/design-decisions.md before running these against a real project).
+package-spark:
+	python scripts/package_spark.py
+
+upload-spark-deps: package-spark
+	gsutil cp dist/mdm.zip gs://$(BUCKET)/dependencies/mdm.zip
+	gsutil cp dist/rapidfuzz.zip gs://$(BUCKET)/dependencies/rapidfuzz.zip
+	gsutil cp spark_jobs/score_pairs.py gs://$(BUCKET)/dependencies/score_pairs.py
+	gsutil cp spark_jobs/cluster_identities.py gs://$(BUCKET)/dependencies/cluster_identities.py
+	gsutil cp config/fs_params.yml gs://$(BUCKET)/dependencies/fs_params.yml
+	gsutil cp config/nicknames.yml gs://$(BUCKET)/dependencies/nicknames.yml
+
+dataproc-score-pairs: upload-spark-deps
+	gcloud dataproc batches submit pyspark gs://$(BUCKET)/dependencies/score_pairs.py \
+		--project=$(PROJECT) --region=us-central1 \
+		--batch=score-pairs-$$(date +%Y%m%d-%H%M%S) \
+		--service-account=mdm-pipeline@$(PROJECT).iam.gserviceaccount.com \
+		--py-files=gs://$(BUCKET)/dependencies/mdm.zip,gs://$(BUCKET)/dependencies/rapidfuzz.zip \
+		--files=gs://$(BUCKET)/dependencies/fs_params.yml,gs://$(BUCKET)/dependencies/nicknames.yml \
+		-- --project $(PROJECT) --bq-temp-bucket $(BUCKET)
+
+dataproc-cluster-identities: upload-spark-deps
+	gcloud dataproc batches submit pyspark gs://$(BUCKET)/dependencies/cluster_identities.py \
+		--project=$(PROJECT) --region=us-central1 \
+		--batch=cluster-identities-$$(date +%Y%m%d-%H%M%S) \
+		--service-account=mdm-pipeline@$(PROJECT).iam.gserviceaccount.com \
+		--py-files=gs://$(BUCKET)/dependencies/mdm.zip,gs://$(BUCKET)/dependencies/rapidfuzz.zip \
+		-- --project $(PROJECT) --bq-temp-bucket $(BUCKET) \
+		--upper-threshold 7.8924 --max-cluster-size 6 --min-cluster-density 0.6
