@@ -107,7 +107,11 @@ def test_run_matching_is_idempotent(tmp_path):
     demographics_after_run1 = con.execute(
         "SELECT * FROM serving.member_demographics ORDER BY patient_global_id"
     ).fetchall()
+    events_after_run1 = con.execute(
+        "SELECT count(*) FROM serving.identity_events WHERE run_id = 'run1'"
+    ).fetchone()[0]
     con.close()
+    assert events_after_run1 == summary_1["num_identity_events"] > 0
 
     summary_2 = run_matching(
         str(db_path), run_id="run2", fs_params=fs_params, nickname_index=nickname_index
@@ -120,11 +124,17 @@ def test_run_matching_is_idempotent(tmp_path):
     demographics_after_run2 = con.execute(
         "SELECT * FROM serving.member_demographics ORDER BY patient_global_id"
     ).fetchall()
+    # identity_events is a permanent audit trail (PROJECT_CONSTITUTION.md #9) -- run1's
+    # events must still be there after run2 writes, not wiped by a wholesale replace.
+    events_after_run1_and_run2 = con.execute(
+        "SELECT count(*) FROM serving.identity_events WHERE run_id = 'run1'"
+    ).fetchone()[0]
     con.close()
 
     assert crosswalk_after_run1 == crosswalk_after_run2
     assert demographics_after_run1 == demographics_after_run2
-    assert summary_2["num_identity_events"] == 0  # nothing changed -- no re-run churn
+    assert summary_2["num_identity_events"] == 0  # nothing NEW -- no re-run churn
+    assert events_after_run1_and_run2 == events_after_run1  # but run1's history survives
     assert summary_1["num_golden_records"] == summary_2["num_golden_records"]
 
 

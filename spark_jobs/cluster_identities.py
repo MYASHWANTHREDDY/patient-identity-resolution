@@ -19,8 +19,12 @@ Real submission (Dataproc Serverless, billed):
         --batch=cluster-identities-$(date +%Y%m%d-%H%M%S) \\
         --py-files=dist/mdm.zip \\
         --deps-bucket=gs://patient-dedup-mdm-mdm-raw \\
-        -- --project patient-dedup-mdm --bq-temp-bucket patient-dedup-mdm-mdm-raw \\
+        -- --project patient-dedup-mdm \\
            --upper-threshold 7.8924 --max-cluster-size 6 --min-cluster-density 0.6
+
+No --bq-temp-bucket, unlike score_pairs.py: this job's BigQuery write uses writeMethod=direct
+(the Storage Write API), not the GCS-staged indirect method, so there's no temp bucket to
+stage through (see the write-side comment below for why).
 
 (thresholds/guards are the same config/matching.yml values mdm.pipeline.run_matching loads
 locally via _load_thresholds() -- a real submission should read them from there rather than
@@ -60,10 +64,20 @@ def run(spark, args) -> int:
         # needs winutils.exe on Windows; toPandas() sidesteps it for this local-only path.
         clusters.toPandas().to_parquet(f"{args.local_parquet_dir}/clusters.parquet")
     else:
+        # writeMethod=direct (BigQuery Storage Write API), not the default "indirect"
+        # (stage to GCS as Parquet, then a BigQuery load job) that score_pairs.py uses.
+        # Confirmed via a real Dataproc round-trip (see docs/design-decisions.md, Phase 13):
+        # the indirect method's Parquet-staged load silently drops every value in the
+        # `members` ARRAY<STRING> column -- size/scored_pairs/confidence/flagged all wrote
+        # correctly, only the array content vanished. The direct method writes over the
+        # Storage Write API without any intermediate file, and round-tripped the same array
+        # data correctly. cluster_identities.py's output is record-count-scaled (thousands
+        # of rows, not the hundreds of thousands score_pairs.py writes), well within what
+        # the direct method comfortably handles.
         (
             clusters.write.format("bigquery")
             .option("table", f"{args.project}.{args.output_table}")
-            .option("temporaryGcsBucket", args.bq_temp_bucket)
+            .option("writeMethod", "direct")
             .mode("overwrite")
             .save()
         )
@@ -78,12 +92,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project", default=None, help="Required unless --local-parquet-dir.")
     parser.add_argument("--pair-scores-table", default="matching.pair_scores")
     parser.add_argument("--output-table", default="matching.clusters")
-    parser.add_argument(
-        "--bq-temp-bucket",
-        default=None,
-        help="GCS bucket the spark-bigquery-connector stages writes through. "
-        "Required unless --local-parquet-dir.",
-    )
     parser.add_argument(
         "--local-parquet-dir",
         default=None,
@@ -101,8 +109,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-cluster-density", type=float, required=True)
     args = parser.parse_args(argv)
 
-    if not args.local_parquet_dir and not (args.project and args.bq_temp_bucket):
-        parser.error("--project and --bq-temp-bucket are required unless --local-parquet-dir")
+    if not args.local_parquet_dir and not args.project:
+        parser.error("--project is required unless --local-parquet-dir")
 
     from pyspark.sql import SparkSession
 

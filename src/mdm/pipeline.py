@@ -1,16 +1,25 @@
 """Orchestrates scoring -> triage -> clustering -> crosswalk -> survivorship into the
 serving tables (PROJECT_CONSTITUTION.md #5, the "SERVING" stage of the architecture).
 Pure functions live in scoring.py/triage.py/clustering.py/crosswalk.py/survivorship.py;
-this module is the only place that sequences them and touches DuckDB.
+this module sequences them and touches DuckDB for the local (ci/dev tier) backend. Several
+of its own helpers (build_serving_tables, next_crosswalk_sequence, sanitize_nan,
+load_fs_params/load_nickname_index/load_thresholds) are public rather than private because
+scripts/run_matching_bigquery.py -- the Dataproc/BigQuery-backed sibling used from
+airflow/dags/dedup_dag.py -- reuses them directly rather than re-implementing the same
+crosswalk/survivorship assembly logic against a different data source (PROJECT_CONSTITUTION.md
+#8: one codebase, two backends).
 """
 
 from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
-import duckdb
 import pandas as pd
+
+if TYPE_CHECKING:
+    import duckdb
 
 from mdm.clustering import build_clusters, finalize_cluster_membership
 from mdm.crosswalk import CrosswalkEntry, resolve_crosswalk
@@ -22,7 +31,7 @@ from mdm.triage import AUTO_MATCH, REVIEW, decide
 _PGID_PATTERN = re.compile(r"^PGID(\d+)$")
 
 
-def _sanitize_nan(records_by_key: dict[str, dict]) -> None:
+def sanitize_nan(records_by_key: dict[str, dict]) -> None:
     """pandas' DataFrame.to_dict silently turns a SQL NULL into float('nan') (or NaT)
     instead of leaving it None -- the same failure mode fixed once already in
     comparators.is_missing. Sanitizing once here, at the pandas/dict boundary, means
@@ -34,7 +43,9 @@ def _sanitize_nan(records_by_key: dict[str, dict]) -> None:
                 record[key] = None
 
 
-def _next_sequence(existing: dict[str, CrosswalkEntry]) -> int:
+def next_crosswalk_sequence(existing: dict[str, CrosswalkEntry]) -> int:
+    """The next unused PGID sequence number given the current crosswalk. Pure and
+    backend-agnostic, like build_serving_tables -- reused by scripts/run_matching_bigquery.py."""
     if not existing:
         return 0
     numbers = []
@@ -71,9 +82,13 @@ def run_matching(
     """`fs_params`/`nickname_index` default to loading from config/ if not passed
     explicitly -- tests pass them in directly so a test run never touches the real,
     committed config/fs_params.yml."""
+    import duckdb  # local: keeps this module importable without duckdb installed (see the
+    # module docstring) for callers -- like the Airflow image -- that only need the
+    # backend-agnostic helpers below, not this DuckDB-specific orchestration function.
+
     run_id = run_id or datetime.now(UTC).isoformat()
-    fs_params = fs_params if fs_params is not None else _load_fs_params()
-    nickname_index = nickname_index if nickname_index is not None else _load_nickname_index()
+    fs_params = fs_params if fs_params is not None else load_fs_params()
+    nickname_index = nickname_index if nickname_index is not None else load_nickname_index()
 
     con = duckdb.connect(db_path)
     try:
@@ -86,12 +101,12 @@ def run_matching(
         candidate_pairs = con.execute(
             "SELECT DISTINCT record_key_a, record_key_b FROM matching.candidate_pairs"
         ).df()
-        thresholds = _load_thresholds()
+        thresholds = load_thresholds()
 
         records_by_key = patient_normalized.set_index("record_key").to_dict(orient="index")
         for key, record in records_by_key.items():
             record["record_key"] = key
-        _sanitize_nan(records_by_key)
+        sanitize_nan(records_by_key)
 
         auto_match_edges = []
         review_pairs = []
@@ -121,12 +136,12 @@ def run_matching(
             membership.setdefault(record_key, (record_key,))
 
         existing_crosswalk = _load_existing_crosswalk(con)
-        next_sequence = _next_sequence(existing_crosswalk)
+        next_sequence = next_crosswalk_sequence(existing_crosswalk)
         new_crosswalk, identity_events = resolve_crosswalk(
             existing_crosswalk, membership, run_id=run_id, next_sequence=next_sequence
         )
 
-        golden_records, field_lineage_rows, alternate_ids, membership_rows = _build_serving_tables(
+        golden_records, field_lineage_rows, alternate_ids, membership_rows = build_serving_tables(
             new_crosswalk, records_by_key, thresholds
         )
 
@@ -156,7 +171,11 @@ def run_matching(
         con.close()
 
 
-def _build_serving_tables(new_crosswalk, records_by_key, thresholds):
+def build_serving_tables(new_crosswalk, records_by_key, thresholds):
+    """Cluster membership + record data -> golden records/lineage/alternate-ids/membership
+    rows. Pure and backend-agnostic (PROJECT_CONSTITUTION.md #8): shared by run_matching
+    (DuckDB, computes crosswalk locally) and scripts/run_matching_bigquery.py (crosswalk
+    resolved against Dataproc-precomputed clusters read from BigQuery)."""
     members_by_pgid: dict[str, list[str]] = {}
     for record_key, entry in new_crosswalk.items():
         members_by_pgid.setdefault(entry.patient_global_id, []).append(record_key)
@@ -225,6 +244,14 @@ def _write_tables(
     con.register("crosswalk_df", crosswalk_df)
     con.execute("CREATE OR REPLACE TABLE serving.crosswalk AS SELECT * FROM crosswalk_df")
 
+    # Append, not replace: identity_events is a permanent audit trail of create/merge/split
+    # history across every run (PROJECT_CONSTITUTION.md #9's storage layout lists it with no
+    # expiration, and its whole purpose is tracking identity changes *over time*) -- unlike
+    # crosswalk, which is legitimately a current-state table safe to replace wholesale each
+    # run because resolve_crosswalk's `new_crosswalk` already carries every prior entry
+    # forward. Replacing this table each run silently discarded every earlier run's history;
+    # the existing idempotency test only checked that a same-data re-run produced 0 *new*
+    # events, which never exercised whether old events survived the second write.
     event_columns = ["event_type", "surviving_id", "retired_id", "run_id", "reason"]
     if identity_events:
         events_df = pd.DataFrame(
@@ -241,8 +268,13 @@ def _write_tables(
         )
     else:
         events_df = pd.DataFrame(columns=event_columns)
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS serving.identity_events ("
+        "event_type VARCHAR, surviving_id VARCHAR, retired_id VARCHAR, "
+        "run_id VARCHAR, reason VARCHAR)"
+    )
     con.register("events_df", events_df)
-    con.execute("CREATE OR REPLACE TABLE serving.identity_events AS SELECT * FROM events_df")
+    con.execute("INSERT INTO serving.identity_events SELECT * FROM events_df")
 
     demographics_columns = [
         "patient_global_id",
@@ -305,7 +337,7 @@ def _write_tables(
     con.execute("CREATE OR REPLACE TABLE serving.review_queue AS SELECT * FROM review_df")
 
 
-def _load_fs_params() -> dict:
+def load_fs_params() -> dict:
     import yaml
 
     from mdm.config import REPO_ROOT
@@ -314,7 +346,7 @@ def _load_fs_params() -> dict:
         return yaml.safe_load(f)
 
 
-def _load_nickname_index() -> dict[str, str]:
+def load_nickname_index() -> dict[str, str]:
     import yaml
 
     from mdm.comparators import build_nickname_index
@@ -325,7 +357,7 @@ def _load_nickname_index() -> dict[str, str]:
     return build_nickname_index(table)
 
 
-def _load_thresholds() -> dict:
+def load_thresholds() -> dict:
     from mdm.config import load_config
 
     config = load_config()

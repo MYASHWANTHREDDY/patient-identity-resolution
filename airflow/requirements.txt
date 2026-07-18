@@ -1,0 +1,23 @@
+# Installed on top of the apache/airflow base image (see airflow/Dockerfile). Deliberately
+# separate from the project's own requirements.txt -- Airflow orchestrates by calling out to
+# BigQuery/Dataproc and running `dbt`/scripts/*.py as subprocesses; it never runs pyspark,
+# duckdb, streamlit, or matplotlib itself, so none of those belong in this image.
+apache-airflow-providers-google==11.0.0
+
+# dbt-core/dbt-bigquery are NOT installed here -- dbt-core 1.12.0 requires click>=8.3.0,
+# which conflicts with Airflow 2.10.4's own click==8.1.7 pin. They're installed into a
+# separate venv in airflow/Dockerfile instead (/home/airflow/dbt-venv), so dbt tasks
+# (conformance_dag, dedup_dag) invoke that venv's `dbt` binary directly rather than sharing
+# site-packages with Airflow.
+
+# scripts/run_matching_bigquery.py and scripts/run_quality_checks_bigquery.py (dedup_dag)
+# import mdm.* directly from the mounted src/ tree -- these are mdm's own runtime deps.
+# PyYAML/pandas/pyarrow/google-cloud-bigquery are deliberately left unpinned here (unlike
+# the project's own requirements.txt): Airflow's own constraints file already pins them
+# (pandas==2.1.4, not the 3.0.3 the rest of this project uses) as transitive dependencies
+# of apache-airflow-providers-google itself, and none of mdm's BigQuery-path code
+# (mdm.backends.bigquery, mdm.pipeline, mdm.quality) relies on anything pandas-3.0-specific
+# -- fighting the constraint here would risk breaking Airflow's own provider internals for
+# no benefit.
+PyYAML
+rapidfuzz==3.14.5

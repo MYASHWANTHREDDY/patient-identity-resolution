@@ -1,0 +1,93 @@
+# Airflow in local Docker, pointed at BigQuery + Dataproc via standard operators
+# (PROJECT_CONSTITUTION.md #15, "why not Composer" -- Composer bills for a running
+# environment even when idle; this costs nothing beyond the local machine). LocalExecutor +
+# Postgres, not CeleryExecutor/Redis/Flower -- a single-machine portfolio setup has no need
+# for a distributed worker pool.
+#
+# Credentials: mounts the host's Application Default Credentials (from `gcloud auth
+# application-default login`) read-only into the container rather than a committed service
+# account key (PROJECT_CONSTITUTION.md anti-patterns: "Committing service account keys").
+# Set GOOGLE_APPLICATION_CREDENTIALS_HOST in .env to the ADC file's path on your machine.
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: airflow/Dockerfile
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
+    GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/gcloud/adc.json
+    # The Google provider's operators/hooks authenticate via an Airflow *Connection*
+    # object (gcp_conn_id, default "google_cloud_default"), a separate abstraction from
+    # GOOGLE_APPLICATION_CREDENTIALS above -- it has to exist even though its own extras
+    # are empty (which tells the hook to fall back to ADC, i.e. the mounted adc.json).
+    AIRFLOW_CONN_GOOGLE_CLOUD_DEFAULT: >-
+      {"conn_type": "google_cloud_platform", "extra": {"project": "${GCP_PROJECT}"}}
+    GCP_PROJECT: ${GCP_PROJECT}
+    GCP_REGION: ${GCP_REGION:-us-central1}
+    GCS_BUCKET: ${GCS_BUCKET}
+    MDM_TIER: ${MDM_TIER:-dev}
+    PYTHONPATH: /opt/airflow/mdm-src
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./dbt:/opt/airflow/dbt
+    - ./config:/opt/airflow/config
+    - ./src:/opt/airflow/mdm-src
+    - ./scripts:/opt/airflow/mdm-scripts
+    - ${GOOGLE_APPLICATION_CREDENTIALS_HOST}:/opt/airflow/gcloud/adc.json:ro
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+    restart: always
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      # Host port 8081, not 8080 -- 8080 may already be bound by another project's stack.
+      - "8081:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-db-volume:

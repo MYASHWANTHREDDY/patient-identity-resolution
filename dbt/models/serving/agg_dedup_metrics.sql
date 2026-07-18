@@ -17,10 +17,19 @@ golden_counts as (
 ),
 
 event_counts as (
+    -- sum(case when ...) over filter(where ...): the latter is DuckDB/Postgres syntax,
+    -- not valid on BigQuery -- this model is only ever built against BigQuery from
+    -- dedup_dag's dbt_run_serving task (Phase 11's parity check deliberately excludes
+    -- models/serving, so this dialect gap went undetected until Phase 13's first real
+    -- run -- see docs/design-decisions.md).
+    -- coalesce(sum(...), 0): sum() of zero rows is NULL, not 0, unlike count(*) filter
+    -- (where ...) which returns 0 for an empty table -- without this, a fresh table with
+    -- no identity_events yet turns every column here NULL and crashes the dashboard's
+    -- int(metrics["create_events"]) cast on a NaN.
     select
-        count(*) filter (where event_type = 'create') as create_events,
-        count(*) filter (where event_type = 'merge') as merge_events,
-        count(*) filter (where event_type = 'split') as split_events
+        coalesce(sum(case when event_type = 'create' then 1 else 0 end), 0) as create_events,
+        coalesce(sum(case when event_type = 'merge' then 1 else 0 end), 0) as merge_events,
+        coalesce(sum(case when event_type = 'split' then 1 else 0 end), 0) as split_events
     from {{ source('serving_written', 'identity_events') }}
 ),
 
@@ -34,7 +43,9 @@ cluster_sizes as (
 select
     source_counts.total_source_records,
     golden_counts.total_golden_records,
-    1.0 - (golden_counts.total_golden_records::double
+    -- no explicit cast needed: `/` is true division (never integer floor division) in
+    -- both DuckDB and BigQuery, and the `1.0 -` already forces float arithmetic even so.
+    1.0 - (golden_counts.total_golden_records
         / nullif(source_counts.total_source_records, 0)) as dedup_rate,
     event_counts.create_events,
     event_counts.merge_events,

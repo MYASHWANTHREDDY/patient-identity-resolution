@@ -728,3 +728,138 @@ this phase's real Dataproc work was well under $1, drawn from the GCP free-trial
 (package → upload deps → submit). If a future package needs bundling the same way, check its
 wheel's actual platform tag on PyPI first (`manylinux_2_17` a.k.a. manylinux2014 is not
 guaranteed for newer package releases) rather than assuming the classic baseline tag.
+
+## Airflow's GCP operators need an Airflow Connection, not just GOOGLE_APPLICATION_CREDENTIALS
+
+**Phase:** 13
+**Decision:** docker-compose.yml sets `AIRFLOW_CONN_GOOGLE_CLOUD_DEFAULT` (a JSON connection
+definition with an empty extra plus a project id) alongside the existing
+`GOOGLE_APPLICATION_CREDENTIALS` mount.
+**What was found:** `GCSToBigQueryOperator`/`DataprocCreateBatchOperator` authenticate via an
+Airflow *Connection* object (`gcp_conn_id`, defaulting to `google_cloud_default`) -- a
+separate abstraction layer from the ADC file mounted at `/opt/airflow/gcloud/adc.json`. The
+connection has to *exist* (`AirflowNotFoundException: The conn_id 'google_cloud_default'
+isn't defined`) even though its own extras stay empty; an empty extra is what tells the hook
+to fall back to ADC. Past that, the hook also needs a project set in the connection's extra,
+or BigQuery load jobs fail with `ValueError: INTERNAL: No default project is specified`, even
+though every operator call in the DAGs already passes an explicit project/table.
+**How to apply:** Defining the connection via an `AIRFLOW_CONN_*` environment variable (not a
+manual `airflow connections add` the user would have to remember to redo) keeps
+`docker compose up` fully reproducible from a clean `.env`.
+
+## dbt-core and Airflow have incompatible click pins -- dbt gets its own venv
+
+**Phase:** 13
+**Decision:** `airflow/Dockerfile` creates a second venv (`/home/airflow/dbt-venv`) and
+installs `dbt-core`/`dbt-bigquery` into it, isolated from Airflow's own site-packages.
+`conformance_dag`/`dedup_dag`'s dbt `BashOperator` tasks call the dbt-venv's `dbt` binary
+directly rather than a bare `dbt` on PATH.
+**What was found:** `dbt-core==1.12.0` requires `click>=8.3.0`; Airflow 2.10.4 requires
+`click==8.1.7` (per its own published constraints file). These are genuinely incompatible in
+one Python environment, not just an unpinned-version accident -- `pip install` fails with
+`ResolutionImpossible` the moment both are requested together. Installing
+`apache-airflow-providers-google` also requires pinning against Airflow's own constraints
+file, or pip resolves an incompatible provider version (found the hard way: guessed
+`10.26.0`, the constraints file wanted `11.0.0`) -- and once pinned to that file, `pandas`
+also resolves to `2.1.4`, not this project's usual `3.0.3`, since pandas is itself a
+transitive dependency of the Google provider. None of `mdm.*`'s BigQuery-path code needed
+anything pandas-3.0-specific, so `airflow/requirements.txt` deliberately leaves
+pandas/pyarrow/PyYAML unpinned rather than fighting Airflow's own constraint.
+
+## spark-bigquery-connector's default (indirect) write method silently drops ARRAY column contents
+
+**Phase:** 13
+**Decision:** `spark_jobs/cluster_identities.py` writes to BigQuery with
+`.option("writeMethod", "direct")` (the BigQuery Storage Write API) instead of the default
+indirect method (stage as Parquet to GCS, then a BigQuery load job) that `score_pairs.py`
+still uses.
+**What was found:** The first real `dedup_dag` run produced a `matching.clusters` table
+where every row's `size`/`scored_pairs`/`confidence`/`flagged` were correct but `members`
+(an `ARRAY<STRING>`, built via `F.collect_list("record_key")` in
+`mdm.backends.spark.build_clusters`) was `[]` on every single row -- confirmed via the raw
+`bq` CLI, not just the Python client, so it wasn't a client-side `to_dataframe()` conversion
+issue. Traced to the write, not the compute: a local Spark unit test
+(`tests/unit/test_backends_spark.py`, which had checked `scored_pairs`/`confidence`/`flagged`
+but never actually asserted on `members`'s contents -- a real gap in the existing test) was
+extended to check members directly and confirmed `build_clusters()` produces correct arrays
+entirely in-memory. Iterated on the write step directly on Dataproc (a tiny 8-row toy job,
+~20 seconds and a fraction of a cent per attempt -- far faster than fighting local Windows
+Spark with extra JARs, which hits the same class of winutils.exe/Ivy-resolution issues as
+previous phases): the default `intermediateFormat=parquet` reproduced the empty-array bug;
+`intermediateFormat=avro` isn't usable without also shipping the separate spark-avro package;
+`writeMethod=direct` round-tripped the same array data correctly on the first try.
+`score_pairs.py` doesn't need the same fix -- `matching.pair_scores` has no array/repeated
+columns -- so it keeps the indirect method, better suited to its much larger
+(hundreds-of-thousands-of-rows) output than the direct method would be.
+**How to apply:** Re-verified end to end: `matching.clusters` now has 0 empty-array rows out
+of 22,965, and `scripts/run_matching_bigquery.py` correctly merges 50,486 source records
+into 25,013 golden records using this data. If a future job needs to write another
+ARRAY/REPEATED column to BigQuery from Spark, default to `writeMethod=direct` rather than
+assuming the indirect path preserves nested types.
+
+## write_serving_tables isn't atomic -- an interrupted run can silently lose identity_events history
+
+**Phase:** 13
+**Decision:** No code change (see rationale below) -- documented as a known limitation.
+`serving.*` was cleared and `scripts/run_matching_bigquery.py` re-run once, uninterrupted, to
+recover a fully-consistent, fully-audited state after the incident described below.
+**What was found:** `write_serving_tables` (both `mdm.pipeline`'s DuckDB version and
+`mdm.backends.bigquery`'s counterpart) performs several independent sequential writes --
+crosswalk, then identity_events, then demographics, field_lineage, alternate_ids,
+membership, review_queue -- with no atomicity across them. Debugging the array-write bug
+above involved firing two overlapping `airflow tasks test dedup_dag crosswalk_survivorship`
+invocations against the same local Airflow LocalExecutor in quick succession; Airflow's own
+scheduler detected the conflict and sent SIGTERM to the first, mid-write ("State of this
+instance has been externally set to None. Terminating instance."). That run's
+`crosswalk`/`member_demographics` writes had already completed (correctly reflecting the
+real 50,486 to 25,013 merge) before the point where it was killed, but `identity_events` --
+the permanent audit trail fixed to append-not-replace earlier this same phase -- never got
+its corresponding MERGE/CREATE rows written. The next run found the crosswalk already fully
+resolved and correctly logged zero *new* events, so the interrupted run's real merge history
+was gone for good, silently, with no error anywhere pointing at the gap.
+**Why no code fix (yet):** The trigger here was two overlapping *manual test invocations*
+against the same ephemeral executor slot, not a failure mode a real, singly-triggered
+Airflow DAG run would hit under normal operation. A proper fix (staging tables plus an
+atomic swap, or accepting that identity_events can only be trusted when cross-checked
+against crosswalk's own state) is a real, separate piece of engineering, not a quick patch,
+and this project's threat model doesn't currently include arbitrary mid-write process
+termination during normal orchestrated runs. Recording it here rather than silently shipping
+around it, per P12.
+**How to apply:** If `identity_events` and `crosswalk`/`member_demographics` are ever found
+to disagree in row-count-implied history again, suspect an interrupted write before
+suspecting the resolution logic itself -- diff crosswalk's distinct `patient_global_id`
+count against identity_events' CREATE-minus-retired count for a cheap consistency check.
+
+## agg_dedup_metrics.sql used DuckDB/Postgres-only syntax invalid on BigQuery -- uncaught until Phase 13's first real run
+
+**Phase:** 13
+**Decision:** `count(*) filter (where ...)` became `coalesce(sum(case when ... then 1 else 0
+end), 0)`; `x::double` became a bare `x` (division is true division, never integer floor
+division, in both DuckDB and BigQuery, so no cast was needed at all).
+**A second regression this introduced, caught by `tests/integration/test_dashboard.py`:**
+`sum(...)` over zero rows is SQL NULL, not 0 -- unlike `count(*) filter (where ...)`, which
+returns 0 for an empty table. The first version of this fix (`sum(...)` with no `coalesce`)
+passed the manual DuckDB/BigQuery checks below (both had real identity_events rows to sum)
+but turned every one of `create_events`/`merge_events`/`split_events` into NULL the moment
+`serving.identity_events` was empty, which then crashed the dashboard's
+`int(metrics["create_events"])` on a NaN. `coalesce(..., 0)` restores the original
+`count(*) filter`'s actual behavior (0 for nothing found) rather than just its BigQuery
+compatibility.
+**What was found:** `dedup_dag`'s `dbt_run_serving` task was the first time `models/serving`
+was ever built against BigQuery -- `scripts/verify_tier_parity.py` (Phase 11) and every
+`dbt-build-prod`/`make dbt-build-prod` invocation since deliberately exclude
+`path:models/serving` (the two-phase dbt flow: those sources are tables
+`run_matching`/`run_matching_bigquery` write, which don't exist on a fresh build). `FILTER
+(WHERE ...)` is DuckDB/Postgres syntax with no BigQuery equivalent; BigQuery's parser
+rejected it outright (`Syntax error: Expected ")" but got "("`). `::double` postfix casting
+is likewise DuckDB/Postgres-only, not standard/BigQuery SQL (`CAST(x AS ...)` is), though it
+never got the chance to fail since the FILTER error came first.
+**How to apply:** Both fixes are dialect-neutral SQL rather than a `{% if target.type == %}`
+branch -- simpler than the phonetic_key.sql-style dialect macros from Phase 3/11, and
+preferable when a portable form already exists (P8's spirit: don't duplicate logic across
+dialects when one expression already works on both). Verified on both targets: `dbt run
+--select agg_dedup_metrics` against local DuckDB, and the real `dbt_run_serving` Airflow task
+against BigQuery. Any `models/serving/*.sql` model is currently *only* exercised against
+BigQuery via a real `dedup_dag` run -- there's no equivalent of `verify_tier_parity.py`
+covering serving models yet, so a future dialect bug here would again go undetected until
+the next real Airflow run.

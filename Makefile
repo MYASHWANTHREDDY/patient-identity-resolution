@@ -1,4 +1,4 @@
-.PHONY: install install-dev lint format test data data-dev data-ci dbt-build-pre dbt-build evaluate estimate-params match quality-checks pipeline dashboard demo tf-plan tf-apply tf-destroy upload-gcs load-bigquery dbt-build-prod verify-parity package-spark upload-spark-deps dataproc-score-pairs dataproc-cluster-identities
+.PHONY: install install-dev lint format test data data-dev data-ci dbt-build-pre dbt-build evaluate estimate-params match quality-checks pipeline dashboard demo tf-plan tf-apply tf-destroy upload-gcs load-bigquery dbt-build-prod verify-parity package-spark upload-spark-deps dataproc-score-pairs dataproc-cluster-identities match-bigquery quality-checks-bigquery airflow-up airflow-down airflow-logs airflow-trigger-ingestion airflow-trigger-conformance airflow-trigger-dedup
 
 TIER ?= dev
 SEED ?= 42
@@ -120,5 +120,35 @@ dataproc-cluster-identities: upload-spark-deps
 		--batch=cluster-identities-$$(date +%Y%m%d-%H%M%S) \
 		--service-account=mdm-pipeline@$(PROJECT).iam.gserviceaccount.com \
 		--py-files=gs://$(BUCKET)/dependencies/mdm.zip,gs://$(BUCKET)/dependencies/rapidfuzz.zip \
-		-- --project $(PROJECT) --bq-temp-bucket $(BUCKET) \
+		-- --project $(PROJECT) \
 		--upper-threshold 7.8924 --max-cluster-size 6 --min-cluster-density 0.6
+
+# Phase 13: crosswalk/survivorship and quality checks against BigQuery-resident Dataproc
+# output (mdm.pipeline's DuckDB logic, reused unchanged -- see docs/design-decisions.md).
+match-bigquery:
+	python scripts/run_matching_bigquery.py --project $(PROJECT)
+
+quality-checks-bigquery:
+	python scripts/run_quality_checks_bigquery.py --project $(PROJECT)
+
+# Phase 13: Airflow in local Docker (PROJECT_CONSTITUTION.md #15). Requires .env (copied
+# from .env.example) with GCP_PROJECT/GCS_BUCKET/GOOGLE_APPLICATION_CREDENTIALS_HOST set.
+airflow-up:
+	docker compose up --build -d
+
+airflow-down:
+	docker compose down
+
+airflow-logs:
+	docker compose logs -f airflow-scheduler
+
+# Real, billed GCP work starts here (Dataproc batches inside dedup_dag) -- see
+# docs/design-decisions.md before running against a real project.
+airflow-trigger-ingestion:
+	docker compose exec airflow-scheduler airflow dags trigger ingestion_dag
+
+airflow-trigger-conformance:
+	docker compose exec airflow-scheduler airflow dags trigger conformance_dag
+
+airflow-trigger-dedup:
+	docker compose exec airflow-scheduler airflow dags trigger dedup_dag

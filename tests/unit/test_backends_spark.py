@@ -103,6 +103,13 @@ def test_build_clusters_flags_low_density_and_oversized_clusters(spark):
     chain_row = next(r for r in lenient.values() if r.scored_pairs == 2)
     assert chain_row.confidence == pytest.approx(2 / 3)
     assert not chain_row.flagged
+    # members' actual contents, not just size/scored_pairs/confidence/flagged -- a real
+    # bug (see docs/design-decisions.md, Phase 13) shipped an empty `members` array to
+    # BigQuery on every row while every other column stayed correct, undetected until
+    # then because nothing asserted on this column specifically.
+    triangle_row = next(r for r in lenient.values() if r.scored_pairs == 3)
+    assert set(triangle_row.members) == {"A", "B", "C"}
+    assert set(chain_row.members) == {"D", "E", "F"}
 
     strict_density = build_clusters(edges, max_cluster_size=10, min_cluster_density=0.9).collect()
     chain_row_strict = next(r for r in strict_density if r.scored_pairs == 2)
