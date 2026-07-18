@@ -1,8 +1,10 @@
 # patient-dedup-system
 
-**Status:** Under construction — Phase 0 (scaffolding). See
+**Status:** Phases 0–9 complete — shippable local build (dbt conformance/blocking, Fellegi-Sunter
+scoring, clustering/crosswalk/survivorship, quality gates, Streamlit dashboard, CI all working
+end to end at `ci`/`dev` tier). GCP/scale phases (10–16) not yet started. See
 [PROJECT_CONSTITUTION.md](PROJECT_CONSTITUTION.md) for the full spec, architecture, and build
-plan; this README will grow into the reviewer-facing summary as phases land (Phase 15).
+plan; this README will grow into the reviewer-facing summary as later phases land (Phase 15).
 
 ## The problem
 
@@ -21,9 +23,23 @@ flag.
 
 ## Quick start
 
-Not yet available — lands at Phase 9 as `make demo` (dev-tier pipeline, no GCP account
-required, under two minutes). Until then, see the phase-by-phase build plan in
-[PROJECT_CONSTITUTION.md #19](PROJECT_CONSTITUTION.md#19-build-phases).
+No GCP account required.
+
+```bash
+pip install -r requirements-dev.txt
+pip install -e .
+cp dbt/profiles.yml.example dbt/profiles.yml
+make demo TIER=dev
+```
+
+`make demo` generates synthetic data, runs the dbt conformance/blocking layers, estimates
+Fellegi-Sunter parameters, runs matching (scoring → triage → clustering → crosswalk →
+survivorship), runs the dbt serving layer + quality gates, and opens the Streamlit dashboard.
+Swap `TIER=ci` for a ~5,000-record run in a few seconds instead of the `dev` tier's 50,000.
+
+See the phase-by-phase build plan in
+[PROJECT_CONSTITUTION.md #19](PROJECT_CONSTITUTION.md#19-build-phases) and what each phase
+actually verified in [docs/design-decisions.md](docs/design-decisions.md).
 
 ## Repository map
 

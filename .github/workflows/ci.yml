@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# No GCP credentials anywhere in this workflow (PROJECT_CONSTITUTION.md #17) -- everything
+# here runs against the ci tier (5,000 records) on local DuckDB.
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+          pip install -e .
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Unit tests
+        run: pytest tests/unit -q
+
+      # The full documented reviewer path (PROJECT_CONSTITUTION.md #4), at ci tier, run
+      # exactly the way `make pipeline TIER=ci` documents it -- not just via pytest's
+      # isolated tmp_path builds, so a break in the real Makefile-driven flow shows up here.
+      - name: Full ci-tier pipeline
+        run: make pipeline TIER=ci
+
+      # Exercises generator determinism, dbt build (both passes), scoring, clustering,
+      # crosswalk idempotency, injected quality-gate violations, and the dashboard --
+      # each test builds its own isolated ci-tier database in tmp_path.
+      - name: Integration tests
+        run: pytest tests/integration -q
+
+      - name: Upload generated results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-tier-results
+          path: |
+            docs/results.md
+            docs/img/pr_curve.png
+          if-no-files-found: ignore

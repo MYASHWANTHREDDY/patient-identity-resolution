@@ -1,4 +1,4 @@
-.PHONY: install install-dev lint format test data data-dev data-ci dbt-build-pre dbt-build evaluate estimate-params match quality-checks pipeline
+.PHONY: install install-dev lint format test data data-dev data-ci dbt-build-pre dbt-build evaluate estimate-params match quality-checks pipeline dashboard demo
 
 TIER ?= dev
 SEED ?= 42
@@ -55,6 +55,9 @@ quality-checks:
 # The full local pipeline, in order. Each step depends on the previous one's output.
 pipeline: data dbt-build-pre estimate-params match dbt-build evaluate quality-checks
 
-# `demo` and other pipeline-driving targets are added as the phases that implement them
-# land (see PROJECT_CONSTITUTION.md #19). Nothing here claims a capability that doesn't
-# exist yet (P3).
+dashboard:
+	streamlit run dashboard/app.py -- --tier $(TIER)
+
+# Reviewer path (PROJECT_CONSTITUTION.md #4): dev-tier pipeline end to end, then the
+# dashboard. No GCP account needed.
+demo: pipeline dashboard

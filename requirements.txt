@@ -17,3 +17,6 @@ pandas==3.0.3
 
 # Phase 6: Fellegi-Sunter scoring, threshold sweep, PR curve.
 matplotlib==3.11.0
+
+# Phase 9: Streamlit dashboard.
+streamlit==1.59.2
