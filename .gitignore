@@ -28,11 +28,12 @@ dbt/logs/
 dbt/profiles.yml
 dbt/.user.yml
 
-# Terraform
+# Terraform. .terraform.lock.hcl is deliberately NOT ignored -- it pins provider versions
+# (P6 reproducibility), the same reason a package-lock.json gets committed.
 terraform/.terraform/
 terraform/*.tfstate
 terraform/*.tfstate.backup
-terraform/.terraform.lock.hcl
+terraform/terraform.tfvars
 
 # Airflow
 airflow/logs/

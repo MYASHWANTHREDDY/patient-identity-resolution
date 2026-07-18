@@ -498,3 +498,79 @@ Spark" step the constitution's testing strategy (§17) describes for the finishe
 Spark scoring job are Phase 12 deliverables; there is no second backend yet to compare against,
 so a tier-parity check would either be fake or silently vacuous. Add it in Phase 12, once
 `backends/spark.py` exists and a real parity comparison is possible.
+
+## GCP project creation, billing link, and budget alert are manual gcloud steps, not Terraform
+
+**Phase:** 10
+**Decision:** `gcloud projects create`, `gcloud billing projects link`, and
+`gcloud billing budgets create` were run directly, once, outside of Terraform. Terraform
+(`terraform/`) owns everything *inside* the project: the GCS bucket, BigQuery datasets,
+service account, and IAM bindings.
+**Why:** Terraform needs an authenticated provider pointed at a project that already has
+billing enabled before it can create anything — there's a bootstrapping order dependency
+that can't be expressed inside the same Terraform run cleanly. Budgets are also
+billing-account-scoped, not project-scoped, which sits awkwardly in a `terraform destroy`
+blast radius anyway: `terraform destroy` should tear down the project's *resources*, not the
+account-level guardrail that's supposed to survive exactly that kind of accident. Real
+production Terraform setups draw this same line (a bootstrap project/script creates the
+project and billing link; the main IaC repo starts after that).
+**What was verified before creating anything billed:** the target billing account
+(`01C27B-B1CA16-5C3547`) was confirmed to still be in **free trial** status via the Console
+(not derivable from `gcloud` — the CLI doesn't expose trial-vs-upgraded as a field) — $300
+untouched, 81 days remaining. Free trial means GCP **stops resources rather than charging the
+card** if the credit is exhausted; the one action that would ever expose the card is manually
+clicking "Upgrade," which nothing in this project's automation does.
+**How to apply:** Never call any GCP-provisioning command (`terraform apply`, `gcloud ... create`)
+without first confirming a project + billing account are in the state you expect. This project's
+$300 credit is shared across the whole Google account, not scoped to `patient-dedup-mdm` alone —
+check the Console's "Top projects" cost breakdown before assuming this project's spend is the
+only draw on it.
+
+## `gcloud` needs `shutil.which()` resolution on Windows, not a bare name in subprocess.run
+
+**Phase:** 10
+**Decision:** `scripts/upload_to_gcs.py` resolves the `gcloud` executable via
+`shutil.which("gcloud")` before passing it to `subprocess.run(..., shell=False)`, instead of
+just using the literal string `"gcloud"`.
+**What broke:** The first real (non-mocked) invocation of the script failed with
+`FileNotFoundError: [WinError 2] The system cannot find the file specified` — on Windows,
+`gcloud` resolves to `gcloud.cmd`, and `CreateProcess` (what `subprocess.run` uses under
+`shell=False`) can't launch a `.cmd` wrapper by its bare, extension-less name the way a POSIX
+shell's `PATH` lookup would. `shutil.which` performs the same `PATHEXT`-aware resolution the
+shell does, and returns the full path either way (`gcloud.cmd` on Windows, `gcloud` on POSIX),
+so the fix is portable rather than Windows-specific special-casing.
+**How to apply:** Any future script that shells out to a CLI tool that might be a `.cmd`/`.bat`
+wrapper on Windows (gcloud, npm, etc.) should resolve it via `shutil.which()` first rather than
+relying on `subprocess.run`'s bare-name lookup — cheap insurance that costs nothing on POSIX.
+Caught by actually running the script against the real bucket after `terraform apply`, not by
+the mocked unit test alone (the mock happily accepted the untranslated `"gcloud"` string).
+
+## `terraform destroy` verified via a real destroy-then-reapply round trip, not just `plan -destroy`
+
+**Phase:** 10
+**Decision:** Phase 10's exit criterion ("`terraform destroy` → clean") was verified by
+actually running `terraform destroy` against the live project, confirming 0 resources
+remained, then immediately re-running `terraform apply` to restore the infrastructure for
+continued work.
+**Why not just `terraform plan -destroy` (read-only, lower-risk):** All 11 resources here (an
+empty GCS bucket, 6 empty BigQuery datasets, a service account, 3 IAM bindings) cost nothing
+whether they exist or not — there's no financial reason to avoid the real round trip, and a
+`-destroy` plan only proves Terraform *intends* a clean teardown, not that GCP actually
+executes it cleanly (e.g. a dataset with a lingering table, an IAM binding that doesn't fully
+detach). P3 — measured, not asserted.
+**How to apply:** This round-trip pattern (destroy, verify empty, reapply) is a good template
+for the "before the first 5M run" cost guardrail checklist in §7 — repeat it before Phase 14's
+scale run specifically, since by then the datasets won't be empty and the round trip will
+carry real signal about whether teardown actually reclaims billed storage.
+
+## `dbt/profiles.yml.example`'s `prod` target defaulted to the wrong BigQuery location
+
+**Phase:** 10
+**Decision:** Changed the `location` env var default from `'US'` (multi-region) to
+`'us-central1'` (the region Terraform actually provisions datasets in).
+**Why it matters:** BigQuery queries fail (or, worse, silently create a second copy of a
+dataset in a different location) when a query's location doesn't match where the referenced
+dataset actually lives. `'US'` was a reasonable-looking placeholder written in Phase 2, before
+any real infrastructure existed to check it against — Phase 10 is the first point this default
+could actually be verified, and it was wrong. `GCP_REGION` still overrides it, so this only
+matters for whoever runs `prod` without setting it explicitly.

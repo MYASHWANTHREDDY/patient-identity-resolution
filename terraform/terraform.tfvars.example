@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars (gitignored) and fill in, or pass -var on the command line.
+# The project must already exist with billing linked -- see docs/design-decisions.md for
+# the manual bootstrap steps (project creation, billing link, budget alert) this repo
+# deliberately does NOT automate via Terraform.
+
+project_id = "your-project-id"
+region     = "us-central1"

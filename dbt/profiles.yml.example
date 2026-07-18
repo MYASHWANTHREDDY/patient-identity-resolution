@@ -18,6 +18,6 @@ mdm:
       method: oauth
       project: "{{ env_var('GCP_PROJECT') }}"
       dataset: conformance
-      location: "{{ env_var('GCP_REGION', 'US') }}"
+      location: "{{ env_var('GCP_REGION', 'us-central1') }}"
       threads: 8
       maximum_bytes_billed: 21474836480

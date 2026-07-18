@@ -1,4 +1,4 @@
-.PHONY: install install-dev lint format test data data-dev data-ci dbt-build-pre dbt-build evaluate estimate-params match quality-checks pipeline dashboard demo
+.PHONY: install install-dev lint format test data data-dev data-ci dbt-build-pre dbt-build evaluate estimate-params match quality-checks pipeline dashboard demo tf-plan tf-apply tf-destroy upload-gcs
 
 TIER ?= dev
 SEED ?= 42
@@ -61,3 +61,20 @@ dashboard:
 # Reviewer path (PROJECT_CONSTITUTION.md #4): dev-tier pipeline end to end, then the
 # dashboard. No GCP account needed.
 demo: pipeline dashboard
+
+# GCP (Phase 10+). Assumes the project already exists with billing linked and
+# terraform/terraform.tfvars set (see docs/design-decisions.md for the manual bootstrap
+# steps this repo deliberately doesn't automate: project creation, billing link, budget
+# alert).
+tf-plan:
+	cd terraform && terraform plan
+
+tf-apply:
+	cd terraform && terraform apply
+
+tf-destroy:
+	cd terraform && terraform destroy
+
+BUCKET ?= $(shell cd terraform && terraform output -raw raw_bucket_name 2>/dev/null)
+upload-gcs:
+	python scripts/upload_to_gcs.py --tier $(TIER) --bucket $(BUCKET)
