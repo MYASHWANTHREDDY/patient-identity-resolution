@@ -1006,6 +1006,12 @@ not copied once and assumed stable.
 
 ## `run_matching_bigquery.py`'s in-memory crosswalk/survivorship doesn't fit in memory at 5M records
 
+**Superseded:** later this same phase, the decision below was revisited and the batching fix
+described in "Batching `run_matching_bigquery.py` by patient_global_id..." was implemented and
+verified against the real 5M-record scale tier. Left here as the original record of the
+decision at the time it was made (P12: alternatives and reasoning matter, not just the final
+state).
+
 **Phase:** 14
 **Decision:** No code change -- documented as a known limitation of the current
 record-count-scaled local processing design. `scripts/run_matching_bigquery.py` remains
@@ -1047,3 +1053,79 @@ more than the ~17.5GB that was actually available), or do the batching rewrite f
 way, verify free memory *before* starting, not just after something goes wrong -- this run's
 6.5GB of pre-existing headroom was already a warning sign the process's peak footprint didn't
 respect.
+
+## Batching `run_matching_bigquery.py` by patient_global_id fixes the 5M-record memory ceiling
+
+**Phase:** 14
+**Decision:** `scripts/run_matching_bigquery.py` groups `new_crosswalk` by `patient_global_id`
+and processes it in batches (`--batch-size`, default 100,000 pgids), slicing
+`patient_normalized_df` per batch instead of converting the whole table to a dict-of-dicts
+up front. `resolve_crosswalk` and `build_serving_tables` are both unchanged -- only the
+orchestration around them is new. `mdm.backends.bigquery.write_serving_tables` is split into
+`write_crosswalk_and_events` (crosswalk/identity_events/review_queue, still written once --
+none of them scale with golden-record count) and `write_serving_batch`
+(member_demographics/field_lineage/member_alternate_identifier/membership, WRITE_TRUNCATE on
+the first batch, WRITE_APPEND after, reproducing the old single-write "replace wholesale"
+semantics without ever holding all golden records in memory at once).
+**Why `resolve_crosswalk` isn't batched too:** it needs every cluster's full membership in a
+single pass to correctly detect splits across the whole run (a cluster processed early can
+claim an id a later cluster used to share -- see `mdm.crosswalk`'s module docstring) --
+batching it would mean carrying `claimed_ids` state across batch boundaries, real added risk
+to already-correct, already-tested logic. It didn't need to: `clusters`
+(record_key -> membership tuple) is far lighter than per-record demographic data, so it was
+never what pushed memory past 11GB in the first place -- see the superseded decision above.
+**Verified:** re-run against the real 5,048,389-record scale tier with memory sampled every
+25-180s throughout. Peak resident memory stabilized around 6.0-6.4GB (vs. 11.2GB+ and still
+climbing before the fix), on the same machine, comfortably within the available headroom.
+Correctness verified two ways: a new unit test (`test_batching_is_invariant_to_batch_size`)
+confirms batch_size=1 and batch_size=100,000 produce identical aggregate output on the same
+input, and the real run's summary (2,830,681 auto-match edges, 2,244,989 clusters, 25,447
+flagged, 2,559,287 golden records) is internally consistent: 2,244,989 clusters minus 25,447
+flagged gives 2,219,542 golden records from clean clusters; adding 216,486 untouched
+singletons and 123,259 individual golden records from flagged clusters' members (each
+flagged cluster's members become singletons, per `finalize_cluster_membership` -- P13's
+"when uncertain, do not merge") totals 2,559,287, exactly matching.
+**How to apply:** `--batch-size` defaults to 100,000; lower it if memory is still tight on a
+given machine, raise it for fewer, larger BigQuery load jobs when memory isn't the
+constraint (e.g. Phase 13's ~50K-record scale needs none of this batching at all -- one
+batch covers everything).
+
+## A stale, unrelated dev-tier crosswalk silently corrupted 0.73% of the scale-tier run
+
+**Phase:** 14
+**Decision:** All `serving.*` tables written by `run_matching_bigquery.py` (`crosswalk`,
+`identity_events`, `member_demographics`, `field_lineage`, `member_alternate_identifier`,
+`membership`, `review_queue`) were dropped before the scale-tier run, rather than letting
+`resolve_crosswalk` read whatever `serving.crosswalk` already contained.
+**What was found:** The first real scale-tier `run_matching_bigquery.py` attempt (the one
+that also hit the `identity_events` schema error below) had already written a new
+`serving.crosswalk` before crashing. Checking it: 36,740 of 5,048,389 rows (0.73%) had
+`first_seen_run != last_seen_run` -- meaning `resolve_crosswalk` treated them as *continuing*
+an identity from an earlier run, despite this being the very first crosswalk resolution ever
+run against the scale-tier dataset. Root cause: `scripts/generate.py` builds every
+`record_key` as `f"{vendor}:{identity_index:08d}"`, with `identity_index` starting at 0
+regardless of tier -- so the dev tier's 24,000 identities and the scale tier's first 24,000
+(of 2,400,000) identities produce *identical record_key strings* for entirely different
+synthetic people. `serving.crosswalk`/`serving.identity_events` still held Phase 13's
+25,013-row dev-tier result (in `serving.identity_events`, confirmed: 25,013 rows, 0 with a
+non-null `retired_id` -- all `CREATE` events, matching Phase 13's own dev-tier golden-record
+count exactly) from when that dbt/Airflow work was verified against BigQuery. The local
+DuckDB path never has this problem -- each tier gets its own `.duckdb` file, so there's no
+shared state to collide across tiers. BigQuery is one project shared by every tier that
+targets it, and nothing had ever cleared its serving layer between a dev-tier verification
+run and a scale-tier real run.
+**A second, independent bug the same stale table caused:** `serving.identity_events`' schema
+had `retired_id` typed `INTEGER`, not `STRING` -- inferred from Phase 13's dev-tier write,
+where every event happened to be a `CREATE` (`retired_id` always `None`, giving BigQuery
+nothing to type-infer from except a default). The scale-tier run's real `MERGE`/`SPLIT`
+events have actual string `retired_id` values, and the `WRITE_APPEND` load job failed
+outright (`Parquet column 'retired_id' has type BYTE_ARRAY which does not match the target
+cpp_type INT64`) rather than silently corrupting anything -- the loudest possible failure
+mode for what could otherwise have been a much quieter bug.
+**How to apply:** Dropped and let all seven tables recreate fresh on the next run --
+verified clean afterward (`COUNTIF(first_seen_run != last_seen_run) = 0` across all
+5,048,389 rows, `COUNT(DISTINCT last_seen_run) = 1`). Any BigQuery-backed pipeline step that
+reads its own prior output as "existing state" (here, `read_existing_crosswalk`) needs that
+state cleared -- not just the source tables reloaded -- whenever the underlying dataset it's
+tracking changes identity, not just size. A tier switch is exactly that kind of change even
+though it looks, superficially, like "the same tables, more rows."

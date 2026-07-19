@@ -93,22 +93,23 @@ def _load_dataframe(
     job.result()
 
 
-def write_serving_tables(
+def write_crosswalk_and_events(
     client,
     project: str,
     new_crosswalk: dict[str, CrosswalkEntry],
     identity_events: list,
-    golden_records: list[dict],
-    field_lineage_rows: list,
-    alternate_ids: list[dict],
-    membership_rows: list[dict],
     review_pairs: list[tuple[str, str, float]],
     run_id: str,
 ) -> None:
-    """Same table set, same replace-vs-append semantics as mdm.pipeline._write_tables (see
-    the comment there on why identity_events appends while crosswalk/demographics/etc.
-    replace wholesale each run) -- WRITE_TRUNCATE mirrors DuckDB's CREATE OR REPLACE TABLE,
-    WRITE_APPEND mirrors its CREATE TABLE IF NOT EXISTS + INSERT INTO."""
+    """The three serving tables that don't scale with golden-record count the way
+    member_demographics/field_lineage/etc. do (see write_serving_batch): crosswalk is one
+    row per record_key (record-count-scaled, not cluster-count-scaled, and needed whole for
+    resolve_crosswalk's cross-cluster split/merge state -- see docs/design-decisions.md,
+    Phase 14), identity_events only has rows for actual create/merge/split events, and
+    review_pairs is already filtered to a small band server-side (read_pair_scores). None of
+    these needed batching to fit in memory; only the golden-record construction below did.
+    Same replace-vs-append semantics as mdm.pipeline._write_tables (see the comment there on
+    why identity_events appends while crosswalk/etc. replace wholesale each run)."""
     crosswalk_df = pd.DataFrame(
         [
             {
@@ -144,6 +145,49 @@ def write_serving_tables(
         client, project, "serving.identity_events", events_df, disposition="WRITE_APPEND"
     )
 
+    review_columns = ["record_key_a", "record_key_b", "score", "status", "run_id"]
+    if review_pairs:
+        review_df = pd.DataFrame(
+            [
+                {
+                    "record_key_a": a,
+                    "record_key_b": b,
+                    "score": score,
+                    "status": "pending",
+                    "run_id": run_id,
+                }
+                for a, b, score in review_pairs
+            ]
+        )
+    else:
+        review_df = pd.DataFrame(columns=review_columns)
+    _load_dataframe(
+        client, project, "serving.review_queue", review_df, disposition="WRITE_TRUNCATE"
+    )
+
+
+def write_serving_batch(
+    client,
+    project: str,
+    golden_records: list[dict],
+    field_lineage_rows: list,
+    alternate_ids: list[dict],
+    membership_rows: list[dict],
+    *,
+    is_first_batch: bool,
+) -> None:
+    """member_demographics/field_lineage/member_alternate_identifier/membership, one call per
+    golden-record batch (see scripts/run_matching_bigquery.py's pgid batching). Building all
+    of a scale-tier run's golden records/lineage in one pass -- and building records_by_key
+    for all 5M source records to do it -- grew past 11GB resident and was still climbing
+    before it could write anything (Phase 14, see docs/design-decisions.md). WRITE_TRUNCATE
+    on the first batch (clearing whatever the previous run left, same as the old single
+    unbatched write), WRITE_APPEND on every batch after -- together reproducing the same
+    'replace wholesale each run' semantics without ever holding all golden records in memory
+    at once. Called at least once even for an empty run, so a run that legitimately produces
+    zero golden records still truncates stale data from a previous run."""
+    disposition = "WRITE_TRUNCATE" if is_first_batch else "WRITE_APPEND"
+
     demographics_columns = [
         "patient_global_id",
         *[f for f in SURVIVORSHIP_FIELDS if f != "ssn"],
@@ -154,11 +198,7 @@ def write_serving_tables(
     else:
         demographics_df = pd.DataFrame(columns=demographics_columns)
     _load_dataframe(
-        client,
-        project,
-        "serving.member_demographics",
-        demographics_df,
-        disposition="WRITE_TRUNCATE",
+        client, project, "serving.member_demographics", demographics_df, disposition=disposition
     )
 
     if field_lineage_rows:
@@ -190,44 +230,16 @@ def write_serving_tables(
                 "rule_applied",
             ]
         )
-    _load_dataframe(
-        client, project, "serving.field_lineage", lineage_df, disposition="WRITE_TRUNCATE"
-    )
+    _load_dataframe(client, project, "serving.field_lineage", lineage_df, disposition=disposition)
 
     alt_ids_df = pd.DataFrame(
         alternate_ids, columns=["patient_global_id", "source_vendor", "source_record_id"]
     )
     _load_dataframe(
-        client,
-        project,
-        "serving.member_alternate_identifier",
-        alt_ids_df,
-        disposition="WRITE_TRUNCATE",
+        client, project, "serving.member_alternate_identifier", alt_ids_df, disposition=disposition
     )
 
     membership_df = pd.DataFrame(
         membership_rows, columns=["patient_global_id", "source_record_count"]
     )
-    _load_dataframe(
-        client, project, "serving.membership", membership_df, disposition="WRITE_TRUNCATE"
-    )
-
-    review_columns = ["record_key_a", "record_key_b", "score", "status", "run_id"]
-    if review_pairs:
-        review_df = pd.DataFrame(
-            [
-                {
-                    "record_key_a": a,
-                    "record_key_b": b,
-                    "score": score,
-                    "status": "pending",
-                    "run_id": run_id,
-                }
-                for a, b, score in review_pairs
-            ]
-        )
-    else:
-        review_df = pd.DataFrame(columns=review_columns)
-    _load_dataframe(
-        client, project, "serving.review_queue", review_df, disposition="WRITE_TRUNCATE"
-    )
+    _load_dataframe(client, project, "serving.membership", membership_df, disposition=disposition)

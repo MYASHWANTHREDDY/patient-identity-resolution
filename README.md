@@ -54,13 +54,14 @@ At the 5,048,389-record scale tier (BigQuery + Dataproc Serverless, no local har
 | Candidate pairs (post blocking-skew fix) | 337.3M (down from 647.1M pre-fix) |
 | Scored pairs | 327,366,916 |
 | Auto-match edges / clusters | 2,830,681 / 2,244,989 |
+| Golden records | 2,559,287 |
 | Scoring runtime / cost | ~33 min / ~$16.62 |
 | Clustering runtime / cost (tuned) | ~18 min / ~$9.25 |
-| Total Dataproc spend, this phase | ~$77.57 (GCP free-trial credit) |
+| Total spend, this phase (Dataproc + BigQuery) | ~$77.57 (GCP free-trial credit) |
 
 Full breakdown, block-size distribution, and every real thing that broke going from 50K to
 5M records (blocking key skew, a Dataproc autoscaler quota ceiling, a threshold that didn't
-transfer across scale, a local memory ceiling): [docs/scale-run.md](docs/scale-run.md).
+transfer across scale, a local memory ceiling, stale cross-tier state): [docs/scale-run.md](docs/scale-run.md).
 
 ## Repository map
 

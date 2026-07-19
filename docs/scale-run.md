@@ -138,26 +138,67 @@ committed threshold (7.8924) was already stale for dev/ci tier too, calibrated a
 sweep. Fixed to 9.0413, re-verified via a fresh `run_matching` + `run_quality_checks` pass
 at dev tier (all 5 checks pass).
 
-## What else broke: memory, not compute
+## Memory, not compute: crosswalk/survivorship's ceiling and its fix
 
 `scripts/run_matching_bigquery.py` (crosswalk resolution + golden-record survivorship) was
 verified at Phase 13's ~50K-record scale and assumed cheap ("record-count-sized data...
-plain Python is enough" per its own docstring). At 5M records / 2.24M clusters, its single
-Python process grew past 11.2GB resident and was still climbing when stopped, on a machine
-with 24GB total RAM and only ~6.5GB free before the run even started. This is a different
-axis of "breaks at scale" than the pair-count-scaled problems above: `records_by_key`,
-`golden_records`, `field_lineage_rows`, `alternate_ids`, and `membership_rows` are all
-plain Python structures sized to the full record/cluster count at once, with no batching --
-fine at 50K, not at multi-million scale. No partial writes occurred (the process was
-stopped during the read/compute phase, before any BigQuery writes). Documented as a known
-limitation rather than fixed this phase -- a correct fix is a real streaming/batched
-rewrite of code shared with the local DuckDB path, not a quick patch. Full narrative:
-`docs/design-decisions.md`, "`run_matching_bigquery.py`'s in-memory crosswalk/survivorship
-doesn't fit in memory at 5M records".
+plain Python is enough" per its original docstring). At 5M records / 2.24M clusters, its
+single Python process grew past 11.2GB resident and was still climbing when stopped, on a
+machine with 24GB total RAM and only ~6.5GB free before the run even started. This is a
+different axis of "breaks at scale" than the pair-count-scaled problems above:
+`records_by_key`, `golden_records`, `field_lineage_rows`, `alternate_ids`, and
+`membership_rows` were all plain Python structures sized to the full record/cluster count
+at once, with no batching -- fine at 50K, not at multi-million scale.
 
-Crosswalk/survivorship, `dbt_run_serving`, snapshotting, and quality gates at full scale
-remain unexercised as a result -- they're verified at dev tier (`docs/results.md`) and at
-Phase 13's ~50K-record BigQuery run, but not against the full 5M-record scale tier.
+Fixed by batching the golden-record construction and write by `patient_global_id` (default
+100,000 pgids/batch, ~26 batches at this scale) rather than materializing all 2.56M golden
+records at once -- `resolve_crosswalk` and `build_serving_tables` stayed unchanged;
+only the orchestration around them batches now. Re-run against the real scale tier with
+memory sampled continuously: peak resident memory stabilized around **6.0-6.4GB**, comfortably
+bounded, vs. 11.2GB+ and still climbing before the fix. Full narrative: `docs/
+design-decisions.md`, "Batching `run_matching_bigquery.py` by patient_global_id...".
+
+## A second bug the memory fix uncovered: stale cross-tier crosswalk state
+
+Fixing the memory ceiling let the run reach far enough to expose a second, independent bug:
+`serving.crosswalk`/`serving.identity_events` still held Phase 13's 25,013-row dev-tier
+(~50K-record) result. Because `scripts/generate.py` builds every `record_key` as
+`f"{vendor}:{identity_index:08d}"` starting at 0 regardless of tier, the dev tier's 24,000
+identities and the scale tier's first 24,000 (of 2,400,000) produce **identical record_key
+strings** for entirely different synthetic people. The first real attempt's
+`resolve_crosswalk` call silently treated 36,740 of 5,048,389 scale-tier records (0.73%) as
+continuing an identity from that unrelated earlier run. The same stale table also caused a
+loud, unrelated failure: `identity_events.retired_id` had been inferred as `INTEGER` from
+Phase 13's data (every event there was a `CREATE`, so `retired_id` was always null), and the
+scale tier's real `MERGE`/`SPLIT` events (actual string IDs) failed to load against it
+outright.
+
+Fixed by dropping all seven `serving.*` tables written by this script and re-running clean.
+Verified: 0 of 5,048,389 crosswalk rows show cross-run reuse afterward, and
+`identity_events.retired_id` now correctly infers as `STRING`. Full narrative: `docs/
+design-decisions.md`, "A stale, unrelated dev-tier crosswalk silently corrupted 0.73% of the
+scale-tier run".
+
+## Crosswalk/survivorship, serving, snapshot, quality gates: the completed run
+
+With both fixes in place, the full chain ran end to end against the real 5M-record scale
+tier:
+
+| Metric | Value |
+| --- | --- |
+| Golden records | 2,559,287 |
+| Identity events (all CREATE -- first-ever resolution) | 2,559,287 |
+| dbt `serving` models | 3/3 (agg_dedup_metrics, dim_member, member_360) |
+| dbt snapshot | 2.6M rows merged, 270.7 MiB scanned |
+| Quality gates | 5/5 pass (dedup_rate=0.493, review_queue_rate=0.0, largest block share <0.01%, 0 implausible DOBs, largest *merged* cluster 6 members) |
+
+`cluster_size_distribution`'s "largest cluster has 6 members" (not 45, the largest raw
+cluster from the Dataproc clustering step) confirms the flagged-cluster guard works
+correctly end to end at scale: the 45-member cluster was flagged, never merged, and each of
+its members became its own singleton golden record instead -- exactly the P13 "when
+uncertain, do not merge" design, verified against real 5M-scale output. Golden-record count
+reconciles exactly: 2,219,542 from clean (unflagged) clusters, plus 216,486 untouched
+singletons, plus 123,259 individual members of flagged clusters, totals 2,559,287.
 
 ## Cost summary
 
@@ -167,12 +208,15 @@ Phase 13's ~50K-record BigQuery run, but not against the full 5M-record scale ti
 | Scoring (Dataproc Serverless) | ~$16.62 |
 | Clustering (Dataproc Serverless, all 5 attempts) | ~$60.95 |
 | Threshold verification queries (BigQuery, on-demand) | negligible (cents) |
+| Crosswalk/survivorship + serving + snapshot + quality gates (BigQuery, on-demand) | negligible (largest single query 270.7 MiB scanned) |
 | **Total, this phase** | **~$77.57** |
 
 All drawn from the GCP free-trial credit balance ($300 total); no real card was charged.
 The clustering total is dominated by the two misconfigured attempts (2 and 4) made while
 diagnosing genuine, real problems -- not wasted exploration for its own sake, but a real
-cost of finding out what breaks at this scale empirically rather than guessing.
+cost of finding out what breaks at this scale empirically rather than guessing. No Dataproc
+(billed) compute was needed to find or fix either the memory ceiling or the stale-crosswalk
+bug -- both were diagnosed and fixed entirely locally and via on-demand BigQuery queries.
 
 ## What broke at 5M that didn't at 50K -- summary
 
@@ -193,4 +237,9 @@ cost of finding out what breaks at this scale empirically rather than guessing.
    assumed to transfer.
 5. **Pure-Python, unbatched record-count-scaled processing** (crosswalk/survivorship) hit
    a real memory ceiling at 5M records / 2.24M clusters -- the "cheap" side of this
-   pipeline turned out not to be cheap at this scale either.
+   pipeline turned out not to be cheap at this scale either. Fixed by batching golden-record
+   construction/writes by `patient_global_id`.
+6. **A shared BigQuery project doesn't isolate tiers the way per-tier local DuckDB files
+   do** -- a dev-tier verification run and a scale-tier real run left overlapping
+   record_keys (both start `identity_index` at 0), and stale serving-layer state from the
+   former silently corrupted 0.73% of the latter until the tables were cleared.
