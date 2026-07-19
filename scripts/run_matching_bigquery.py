@@ -30,7 +30,6 @@ from mdm.pipeline import (
     next_crosswalk_sequence,
     sanitize_nan,
 )
-from mdm.triage import REVIEW, decide
 
 
 def _clusters_from_dataframe(clusters_df) -> list[Cluster]:
@@ -56,7 +55,9 @@ def run_matching_bigquery(project: str, *, run_id: str | None = None) -> dict:
 
     patient_normalized_df = read_patient_normalized(client, project)
     clusters_df = read_clusters(client, project)
-    pair_scores_df = read_pair_scores(client, project)
+    pair_scores_df = read_pair_scores(
+        client, project, lower=thresholds["lower"], upper=thresholds["upper"]
+    )
     existing_crosswalk = read_existing_crosswalk(client, project)
 
     records_by_key = patient_normalized_df.set_index("record_key").to_dict(orient="index")
@@ -72,10 +73,10 @@ def run_matching_bigquery(project: str, *, run_id: str | None = None) -> dict:
     for record_key in records_by_key:
         membership.setdefault(record_key, (record_key,))
 
+    # Already filtered to the review band server-side (read_pair_scores' WHERE clause
+    # matches triage.decide()'s REVIEW condition exactly) -- every row here belongs.
     review_pairs = [
-        (row.record_key_a, row.record_key_b, row.score)
-        for row in pair_scores_df.itertuples()
-        if decide(row.score, upper=thresholds["upper"], lower=thresholds["lower"]) == REVIEW
+        (row.record_key_a, row.record_key_b, row.score) for row in pair_scores_df.itertuples()
     ]
 
     next_sequence = next_crosswalk_sequence(existing_crosswalk)

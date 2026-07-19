@@ -20,4 +20,10 @@ mdm:
       dataset: conformance
       location: "{{ env_var('GCP_REGION', 'us-central1') }}"
       threads: 8
-      maximum_bytes_billed: 21474836480
+      # 50 GiB, not the 20 GiB set in Phase 11 -- at the scale tier (5M records),
+      # matching.candidate_pairs is ~647M rows, and even a simple structural test
+      # (assert_candidate_pairs_ordered_no_self_pairs) needs to scan ~23 GiB of it. The
+      # actual dollar cost is trivial (BigQuery on-demand pricing, ~$0.15 for that one
+      # query) -- this cap exists to catch a genuinely runaway/mistaken query, not to
+      # throttle legitimate scale-tier operations (see docs/scale-run.md).
+      maximum_bytes_billed: 53687091200

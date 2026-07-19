@@ -20,7 +20,7 @@ Real submission (Dataproc Serverless, billed):
         --py-files=dist/mdm.zip \\
         --deps-bucket=gs://patient-dedup-mdm-mdm-raw \\
         -- --project patient-dedup-mdm \\
-           --upper-threshold 7.8924 --max-cluster-size 6 --min-cluster-density 0.6
+           --upper-threshold 20.5 --max-cluster-size 6 --min-cluster-density 0.6
 
 No --bq-temp-bucket, unlike score_pairs.py: this job's BigQuery write uses writeMethod=direct
 (the Storage Write API), not the GCS-staged indirect method, so there's no temp bucket to
@@ -104,6 +104,26 @@ def main(argv: list[str] | None = None) -> int:
         help="GCS/HDFS path for truncating connected-components' iterative query plan. "
         "Recommended for real (5M-scale) runs; unnecessary for small local tests.",
     )
+    parser.add_argument(
+        "--shuffle-partitions",
+        type=int,
+        default=32,
+        help="spark.sql.shuffle.partitions. Default (200) assumes cluster-sized parallelism; "
+        "connected_components shuffles every iteration, so at this project's real Dataproc "
+        "Serverless quota (see docs/design-decisions.md, Phase 14: CPUS_ALL_REGIONS caps "
+        "this project at 7 workers x 4 cores = 28 slots), 200 partitions means each "
+        "iteration schedules ~7 sequential waves of mostly-idle executors instead of ~1 -- "
+        "confirmed as the dominant cost driver on a cancelled real run (76 min, ~$45, never "
+        "converged). 32 keeps slots close to full without the multi-wave overhead.",
+    )
+    parser.add_argument(
+        "--max-executors",
+        type=int,
+        default=7,
+        help="spark.dynamicAllocation.maxExecutors. Matches this project's observed "
+        "CPUS_ALL_REGIONS ceiling (see docs/design-decisions.md, Phase 14) so the "
+        "autoscaler stops repeatedly requesting executors that quota will never grant.",
+    )
     parser.add_argument("--upper-threshold", type=float, required=True)
     parser.add_argument("--max-cluster-size", type=int, required=True)
     parser.add_argument("--min-cluster-density", type=float, required=True)
@@ -114,7 +134,11 @@ def main(argv: list[str] | None = None) -> int:
 
     from pyspark.sql import SparkSession
 
-    builder = SparkSession.builder.appName("mdm-cluster-identities")
+    builder = (
+        SparkSession.builder.appName("mdm-cluster-identities")
+        .config("spark.sql.shuffle.partitions", args.shuffle_partitions)
+        .config("spark.dynamicAllocation.maxExecutors", args.max_executors)
+    )
     if args.local_parquet_dir:
         # See the matching comment in spark_jobs/score_pairs.py: local-only, sidesteps
         # Windows pyspark launch-path quirks; Dataproc Serverless sets its own master and

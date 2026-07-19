@@ -74,7 +74,7 @@ def _patched(**overrides):
     defaults = dict(
         read_patient_normalized=lambda client, project: PATIENT_NORMALIZED,
         read_clusters=lambda client, project: CLUSTERS,
-        read_pair_scores=lambda client, project: PAIR_SCORES,
+        read_pair_scores=lambda client, project, lower, upper: PAIR_SCORES,
         read_existing_crosswalk=lambda client, project: {},
     )
     defaults.update(overrides)

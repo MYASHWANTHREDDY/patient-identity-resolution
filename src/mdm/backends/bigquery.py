@@ -45,8 +45,18 @@ def read_clusters(client, project: str) -> pd.DataFrame:
     return client.query(query).to_dataframe()
 
 
-def read_pair_scores(client, project: str) -> pd.DataFrame:
-    query = f"SELECT record_key_a, record_key_b, score FROM `{project}.matching.pair_scores`"
+def read_pair_scores(client, project: str, *, lower: float, upper: float) -> pd.DataFrame:
+    """Only pairs in the review band [lower, upper) -- the sole use of pair_scores outside
+    Dataproc scoring/clustering is routing borderline pairs to review_queue, and unlike
+    patient_normalized/clusters, pair_scores is pair-count-scaled (hundreds of millions of
+    rows at the scale tier, not record-count-scaled) -- downloading the whole table to
+    filter client-side doesn't fit in memory once real data volume is involved (see
+    docs/design-decisions.md, Phase 14). lower/upper match triage.decide()'s REVIEW
+    condition exactly, so every row this query returns already belongs in review_pairs."""
+    query = (
+        f"SELECT record_key_a, record_key_b, score FROM `{project}.matching.pair_scores` "
+        f"WHERE score >= {lower} AND score < {upper}"
+    )
     return client.query(query).to_dataframe()
 
 

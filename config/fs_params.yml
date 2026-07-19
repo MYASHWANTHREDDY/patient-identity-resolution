@@ -4,101 +4,101 @@
 # weight = log2(m/u) in bits. See PROJECT_CONSTITUTION.md #11.4.
 first_name:
   exact:
-    m: 0.714625
-    u: 0.005948
-    weight: 6.9086
+    m: 0.718968
+    u: 0.006048
+    weight: 6.8933
   nickname:
-    m: 0.07647
-    u: 0.00145
-    weight: 5.7212
+    m: 0.071542
+    u: 0.0009
+    weight: 6.3132
   near:
-    m: 0.200875
-    u: 0.002449
-    weight: 6.3578
+    m: 0.201496
+    u: 0.003099
+    weight: 6.0228
   similar:
-    m: 0.004583
-    u: 0.004249
-    weight: 0.1094
+    m: 0.004997
+    u: 0.004449
+    weight: 0.1677
   different:
-    m: 0.003412
-    u: 0.985854
-    weight: -8.1748
+    m: 0.002964
+    u: 0.985454
+    weight: -8.3773
   missing:
     m: 3.4e-05
     u: 5.0e-05
     weight: -0.5365
 last_name:
   exact:
-    m: 0.78951
-    u: 0.002299
-    weight: 8.4236
+    m: 0.786512
+    u: 0.003149
+    weight: 7.9644
   nickname:
     m: 3.4e-05
     u: 5.0e-05
     weight: -0.5365
   near:
-    m: 0.205183
-    u: 0.0009
-    weight: 7.8332
+    m: 0.208112
+    u: 0.00145
+    weight: 7.1656
   similar:
-    m: 0.002447
-    u: 0.004449
-    weight: -0.8625
+    m: 0.003102
+    u: 0.003849
+    weight: -0.3114
   different:
-    m: 0.002791
-    u: 0.992252
-    weight: -8.4736
+    m: 0.002206
+    u: 0.991453
+    weight: -8.8123
   missing:
     m: 3.4e-05
     u: 5.0e-05
     weight: -0.5365
 dob:
   exact:
-    m: 0.785547
+    m: 0.782273
     u: 5.0e-05
-    weight: 13.9399
+    weight: 13.9339
   transposed:
-    m: 0.07616
+    m: 0.078951
     u: 5.0e-05
-    weight: 10.5733
+    weight: 10.6252
   one_component_off:
-    m: 0.13023
-    u: 0.003999
-    weight: 5.0253
+    m: 0.130505
+    u: 0.004549
+    weight: 4.8425
   year_only:
-    m: 0.007168
-    u: 0.008947
-    weight: -0.3199
+    m: 0.007754
+    u: 0.009647
+    weight: -0.3152
   different:
-    m: 0.000862
-    u: 0.986904
-    weight: -10.1618
+    m: 0.000482
+    u: 0.985654
+    weight: -10.9965
   missing:
     m: 3.4e-05
     u: 5.0e-05
     weight: -0.5365
 ssn:
   exact:
-    m: 0.299397
+    m: 0.29981
     u: 5.0e-05
-    weight: 12.5481
+    weight: 12.5501
   different:
     m: 3.4e-05
-    u: 0.39684
-    weight: -13.4911
+    u: 0.395891
+    weight: -13.4877
   missing:
-    m: 0.700569
-    u: 0.60311
-    weight: 0.2161
+    m: 0.700155
+    u: 0.604059
+    weight: 0.213
 gender:
   exact:
     m: 0.999931
-    u: 0.491026
-    weight: 1.026
+    u: 0.496026
+    weight: 1.0114
   different:
     m: 3.4e-05
-    u: 0.508924
-    weight: -13.85
+    u: 0.503924
+    weight: -13.8358
   missing:
     m: 3.4e-05
     u: 5.0e-05

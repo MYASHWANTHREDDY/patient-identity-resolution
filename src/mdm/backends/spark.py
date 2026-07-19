@@ -52,9 +52,20 @@ def join_pairs_with_records(candidate_pairs, patient_normalized):
     """Both Spark DataFrames: candidate_pairs has record_key_a/record_key_b;
     patient_normalized has record_key + SCORING_FIELDS. Returns one row per pair with
     a_/b_-prefixed copies of every scoring field -- the Spark-side equivalent of
-    mdm.pipeline's records_by_key dict lookup, done via a join instead."""
-    side_a = patient_normalized
-    side_b = patient_normalized
+    mdm.pipeline's records_by_key dict lookup, done via a join instead.
+
+    Broadcasts patient_normalized rather than letting Spark shuffle-join it: at any tier
+    this project targets, patient_normalized is small (a few hundred MB even at 5M records
+    -- a handful of short string/date fields per row) while candidate_pairs is the thing
+    that's actually large (hundreds of millions of rows at the scale tier). A shuffle join
+    would shuffle both sides of *both* joins below; broadcasting the small side sends it to
+    every executor once and then joins locally, no shuffle at all -- the difference between
+    a few dollars and a potentially very large Dataproc bill at scale (see
+    docs/design-decisions.md, Phase 14)."""
+    from pyspark.sql.functions import broadcast
+
+    side_a = broadcast(patient_normalized)
+    side_b = broadcast(patient_normalized)
     for field in SCORING_FIELDS:
         side_a = side_a.withColumnRenamed(field, f"a_{field}")
         side_b = side_b.withColumnRenamed(field, f"b_{field}")

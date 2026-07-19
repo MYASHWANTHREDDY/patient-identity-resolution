@@ -102,8 +102,24 @@ with DAG(
                 # spark_jobs/cluster_identities.py and docs/design-decisions.md, Phase 13.
                 "--project",
                 PROJECT,
+                # --checkpoint-dir/--shuffle-partitions/--max-executors: without these,
+                # connected_components' default 200 shuffle partitions vastly oversubscribe
+                # this project's real CPUS_ALL_REGIONS-capped 7-worker/28-core ceiling,
+                # turning a job that should take minutes into one that runs 76+ minutes and
+                # accumulates shuffle-storage cost the whole time it's starved (Phase 14,
+                # docs/design-decisions.md).
+                "--checkpoint-dir",
+                f"gs://{BUCKET}/checkpoints/cluster-identities",
+                "--shuffle-partitions",
+                "32",
+                "--max-executors",
+                "7",
+                # 20.5, NOT config/matching.yml's dev/ci-tier value: the same FS score is
+                # far less precise at 5M records than at 50K (Phase 14 finding), so the
+                # scale-tier auto-match cutoff is measured separately. See the comment on
+                # thresholds in config/matching.yml and docs/design-decisions.md.
                 "--upper-threshold",
-                "7.8924",
+                "20.5",
                 "--max-cluster-size",
                 "6",
                 "--min-cluster-density",

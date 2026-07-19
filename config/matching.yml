@@ -14,7 +14,7 @@ blocking:  # Phase 5
     - { name: bp_ssn,        keys: [ssn],        skip_if_null: true }
     - { name: bp_dob_lname,  keys: [dob, last_name_phonetic] }
     - { name: bp_year_names, keys: [dob_year, first_name_phonetic, last_name_phonetic] }
-    - { name: bp_coarse,     keys: [last_name_phonetic, gender, dob_decade] }
+    - { name: bp_coarse,     keys: [last_name_phonetic, gender, dob_year] }  # was dob_decade, see design-decisions.md
   max_block_size: 1000
 
 comparators:  # Phase 4
@@ -33,9 +33,20 @@ scoring:  # Phase 6
 # precision >= 0.99 and recall >= 0.99 are both satisfied from the same cutoff -- the
 # review band collapses to zero-width here. See docs/design-decisions.md. Re-run the
 # sweep and update these if fs_params.yml or the noise model changes.
+#
+# dev/ci tier ONLY -- mdm.pipeline.run_matching (local DuckDB) reads this directly via
+# load_thresholds(). Does NOT transfer to the scale tier: the same FS score corresponds to
+# a much lower precision at 5M records than at 50K (Phase 14 finding, see
+# docs/design-decisions.md) -- the population of records that coincidentally agree on
+# bp_coarse's key (last_name_phonetic + gender + dob_year) grows much faster than the
+# population of true duplicates as record count grows, so a fixed score level gets
+# reached by many more non-matches at scale. spark_jobs/cluster_identities.py's
+# --upper-threshold is a separately-measured, scale-appropriate value (currently 20.5,
+# see Makefile's dataproc-cluster-identities target and design-decisions.md) -- not this
+# value. Re-derive both independently whenever fs_params.yml changes.
 thresholds:  # Phase 6
-  upper: 7.8924
-  lower: 7.8924
+  upper: 9.0413
+  lower: 9.0413
 
 clustering:  # Phase 7
   max_cluster_size: 6

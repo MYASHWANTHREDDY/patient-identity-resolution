@@ -114,6 +114,11 @@ dataproc-score-pairs: upload-spark-deps
 		--files=gs://$(BUCKET)/dependencies/fs_params.yml,gs://$(BUCKET)/dependencies/nicknames.yml \
 		-- --project $(PROJECT) --bq-temp-bucket $(BUCKET)
 
+# --upper-threshold is 20.5, NOT config/matching.yml's 9.0413 (that value is dev/ci-tier
+# only -- see the comment there): measured directly against real scale-tier ground truth
+# (Phase 14, docs/design-decisions.md), the same FS score is far less precise at 5M records
+# than at 50K, so the auto-match cutoff has to move up to hold precision. Re-measure this
+# whenever fs_params.yml changes.
 dataproc-cluster-identities: upload-spark-deps
 	gcloud dataproc batches submit pyspark gs://$(BUCKET)/dependencies/cluster_identities.py \
 		--project=$(PROJECT) --region=us-central1 \
@@ -121,7 +126,9 @@ dataproc-cluster-identities: upload-spark-deps
 		--service-account=mdm-pipeline@$(PROJECT).iam.gserviceaccount.com \
 		--py-files=gs://$(BUCKET)/dependencies/mdm.zip,gs://$(BUCKET)/dependencies/rapidfuzz.zip \
 		-- --project $(PROJECT) \
-		--upper-threshold 7.8924 --max-cluster-size 6 --min-cluster-density 0.6
+		--checkpoint-dir gs://$(BUCKET)/checkpoints/cluster-identities \
+		--shuffle-partitions 32 --max-executors 7 \
+		--upper-threshold 20.5 --max-cluster-size 6 --min-cluster-density 0.6
 
 # Phase 13: crosswalk/survivorship and quality checks against BigQuery-resident Dataproc
 # output (mdm.pipeline's DuckDB logic, reused unchanged -- see docs/design-decisions.md).
