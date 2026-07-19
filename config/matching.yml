@@ -61,8 +61,9 @@ survivorship:  # Phase 7
     ssn:        [VENDOR_A, VENDOR_B]
     gender:     [VENDOR_A, VENDOR_B, VENDOR_C]
 
-gcp:  # Phase 10+
-  project: ${GCP_PROJECT}
-  region: ${GCP_REGION}
-  raw_bucket: ${GCP_PROJECT}-mdm-raw
-  max_bytes_billed: 21474836480
+# GCP project/region/bucket are read from environment variables (GCP_PROJECT, GCP_REGION,
+# GCS_BUCKET) and Terraform outputs (see Makefile), not from this file -- nothing in
+# src/mdm reads a `gcp` key here, so a config block for it would be a second, unenforced
+# source of truth (P5). The BigQuery query byte cap lives in dbt/profiles.yml's `prod`
+# target (currently 50 GiB, see docs/design-decisions.md) since that's what dbt actually
+# reads.
