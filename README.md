@@ -1,10 +1,14 @@
 # patient-dedup-system
 
-**Status:** Phases 0–9 complete — shippable local build (dbt conformance/blocking, Fellegi-Sunter
-scoring, clustering/crosswalk/survivorship, quality gates, Streamlit dashboard, CI all working
-end to end at `ci`/`dev` tier). GCP/scale phases (10–16) not yet started. See
-[PROJECT_CONSTITUTION.md](PROJECT_CONSTITUTION.md) for the full spec, architecture, and build
-plan; this README will grow into the reviewer-facing summary as later phases land (Phase 15).
+**Status:** Phases 0–14 complete — shippable local build (dbt conformance/blocking,
+Fellegi-Sunter scoring, clustering/crosswalk/survivorship, quality gates, Streamlit dashboard,
+CI all working end to end at `ci`/`dev` tier) plus the full GCP path (BigQuery, Dataproc
+Serverless, Airflow orchestration) verified at a real 5,048,389-record scale run — see
+[docs/scale-run.md](docs/scale-run.md) for real candidate-pair counts, block skew, Dataproc
+cost, and what broke at 5M that didn't at 50K. Phases 15–16 (documentation polish, stretch
+goals) not yet started. See [PROJECT_CONSTITUTION.md](PROJECT_CONSTITUTION.md) for the full
+spec, architecture, and build plan; this README will grow into the reviewer-facing summary as
+Phase 15 lands.
 
 ## The problem
 
@@ -40,6 +44,23 @@ Swap `TIER=ci` for a ~5,000-record run in a few seconds instead of the `dev` tie
 See the phase-by-phase build plan in
 [PROJECT_CONSTITUTION.md #19](PROJECT_CONSTITUTION.md#19-build-phases) and what each phase
 actually verified in [docs/design-decisions.md](docs/design-decisions.md).
+
+## Scale run: real numbers
+
+At the 5,048,389-record scale tier (BigQuery + Dataproc Serverless, no local hardware):
+
+| Metric | Value |
+| --- | --- |
+| Candidate pairs (post blocking-skew fix) | 337.3M (down from 647.1M pre-fix) |
+| Scored pairs | 327,366,916 |
+| Auto-match edges / clusters | 2,830,681 / 2,244,989 |
+| Scoring runtime / cost | ~33 min / ~$16.62 |
+| Clustering runtime / cost (tuned) | ~18 min / ~$9.25 |
+| Total Dataproc spend, this phase | ~$77.57 (GCP free-trial credit) |
+
+Full breakdown, block-size distribution, and every real thing that broke going from 50K to
+5M records (blocking key skew, a Dataproc autoscaler quota ceiling, a threshold that didn't
+transfer across scale, a local memory ceiling): [docs/scale-run.md](docs/scale-run.md).
 
 ## Repository map
 

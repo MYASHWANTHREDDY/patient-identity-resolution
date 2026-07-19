@@ -863,3 +863,187 @@ against BigQuery. Any `models/serving/*.sql` model is currently *only* exercised
 BigQuery via a real `dedup_dag` run -- there's no equivalent of `verify_tier_parity.py`
 covering serving models yet, so a future dialect bug here would again go undetected until
 the next real Airflow run.
+
+## `bp_coarse`'s fixed-cardinality DOB key made block size grow with population, not stay bounded
+
+**Phase:** 14
+**Decision:** `bp_coarse` blocks on `dob_year`, not `dob_decade` (`dbt/models/blocking/block_keys.sql`, `config/matching.yml`).
+**What was found:** At the 5M-record scale tier, `matching.candidate_pairs` came out to
+647.1M rows, with 98% of them contributed by `bp_coarse` alone. Root cause: `dob_decade`
+(`last_name_phonetic | gender | dob_decade`) has bounded cardinality -- roughly (distinct
+phonetic last names) x 2 x ~12 decades -- so as population grows, the *same* number of
+blocks has to hold *more* records each, and candidate pairs from a block grow with the
+square of its size. `bp_year_names` (`dob_year | first_name_phonetic | last_name_phonetic`)
+already proved this doesn't have to happen: at the same 5M scale its max observed block
+size was 76, because adding a finer DOB key and a first-name key keeps block population
+roughly constant as the record count grows, rather than concentrating into fewer, larger
+buckets.
+**Why this wasn't a recall/cost tradeoff:** `max_block_size: 1000` silently drops any block
+over that size from candidate generation (P5's guard against exactly this kind of blowup).
+`dob_decade` blocks were large enough that a meaningful number of them were hitting that cap
+and getting excluded outright -- so the coarse key wasn't just expensive, it was actively
+*dropping* true pairs it should have caught. Switching to `dob_year` cut candidate pairs
+647.1M -> 337.3M (48%) at scale, while at dev tier recall improved 0.5329 -> 0.5338 and
+blocking pair-completeness improved 0.9315 -> 0.9555 -- confirmed via
+`python -m mdm.evaluate --tier dev` before and after. Post-fix scale-tier `block_stats`:
+`bp_coarse` max block size 697 (184,721 blocks, avg 27.3), contributing 323.9M of the
+337.3M total candidate pairs (97.4% -- still the dominant pass, just no longer a runaway
+one).
+**How to apply:** A blocking key's cardinality has to be checked against how it scales with
+population, not just how it performs at whatever tier is currently being tested -- a key
+that looks fine at 50K records (few enough people share `last_name x gender x decade` that
+blocks stay small) can silently become the dominant cost driver at 5M just because the
+*same* key space now has to absorb 100x the population. Prefer keys whose cardinality grows
+with the data (a wider or finer field) over ones with a small fixed range.
+
+## BigQuery's `maximum_bytes_billed` cap needs to scale with the tier's candidate-pair volume
+
+**Phase:** 14
+**Decision:** `dbt/profiles.yml`'s `prod` target raised `maximum_bytes_billed` from 20 GiB to
+50 GiB (`dbt/profiles.yml.example` carries the same value with the rationale inline).
+**What was found:** `assert_candidate_pairs_ordered_no_self_pairs` (a structural dbt test
+that scans all of `matching.candidate_pairs`) failed with the query cancelled once
+`candidate_pairs` reached 647M rows at the scale tier, needing to scan ~22.9 GiB against a
+20 GiB cap set back in Phase 11 when this table was orders of magnitude smaller.
+**Why 50 GiB and not just disabling the cap:** The cap exists to catch a genuinely
+runaway/mistaken query (e.g. an accidental full cross join), not to throttle legitimate
+scale-tier structural tests -- removing it entirely would lose that guard rail. The real
+dollar cost of the query that hit the cap is trivial on BigQuery's on-demand pricing
+(~$0.15), so the fix is sizing the cap to what scale-tier `dbt build` actually needs
+(with headroom), not raising it indefinitely.
+**How to apply:** Any safety cap tied to a tier-scaled table's full-scan cost needs to be
+re-checked (not just re-guessed) whenever a new tier's data volume is exercised for the
+first time -- the 647.3M-pair `candidate_pairs` table this cap now accommodates is itself
+downstream of the `bp_coarse` fix above, and shrank to 337.3M rows once that landed.
+
+## Dataproc Serverless autoscaling is quota-capped, and default shuffle partitioning doesn't know it
+
+**Phase:** 14
+**Decision:** `spark_jobs/cluster_identities.py` takes `--shuffle-partitions` (default 32) and
+`--max-executors` (default 7), applied via `spark.sql.shuffle.partitions` and
+`spark.dynamicAllocation.maxExecutors`. `Makefile`'s `dataproc-cluster-identities` target and
+`airflow/dags/dedup_dag.py`'s `cluster_identities` task both pass `--checkpoint-dir` (missing
+from both before this phase) alongside the new flags.
+**What was found:** The first real clustering attempt at scale ran for 76+ minutes without
+completing -- dramatically slower than the 327M-pair *scoring* job, which finished in 34
+minutes on the same project. `gcloud logging read` against
+`resource.type="cloud_dataproc_batch"` showed the autoscaler requesting up to 492 executors
+(`"max-needed-executors": "492"`) but hard-capped at 7 primary workers by the project's
+`CPUS_ALL_REGIONS` compute quota (`"Insufficient 'CPUS_ALL_REGIONS' quota. Requested 4.0,
+available 0.0."`, `"constraintsReached": ["SCALING_CAPPED_DUE_TO_LACK_OF_QUOTA"]`). Combined
+with `connected_components`'s default 200 shuffle partitions (Spark's cluster-sized default,
+vastly oversubscribed against the real ~28 available cores at 7 workers x 4 cores), every one
+of the algorithm's iterations scheduled roughly 7 sequential waves of mostly-idle executors
+instead of 1 -- and because `connected_components` shuffles *every iteration*, this overhead
+compounded across the whole run instead of being a one-time cost the way it would be for a
+single-pass job like scoring.
+**The real cost of getting this wrong:** Cancelling that first attempt still cost
+approximately $45 (38.45 DCU-hours + 3,894 GB-hours) for a job that never converged --
+*more* than the entire successful 337M-pair scoring run (~$16.60). The lesson generalizes:
+Dataproc Serverless bills `shuffleStorageGbSeconds`, which accumulates with wall-clock time,
+not just data volume -- an iterative algorithm that's *slow* because of a parallelism
+mismatch can cost more than a one-shot job over *more* data that runs efficiently. Small
+data does not imply small cost if the job runs long enough. A second attempt was submitted
+without re-uploading the locally-edited `cluster_identities.py` to GCS first, and failed
+immediately (~$0.26) on `unrecognized arguments: --shuffle-partitions --max-executors` --
+Dataproc ran the stale script already on GCS, not the local one; the GCS copy is the only one
+that matters once a job is submitted via `gs://`.
+**How to apply:** `--shuffle-partitions 32` (close to, slightly above, the real 28-core
+ceiling) and `--max-executors 7` (matching the observed quota ceiling exactly, so the
+autoscaler stops repeatedly requesting executors quota will never grant) together brought
+the real, correctly-configured run in at [FILL IN: runtime/cost once the corrected run
+completes]. Before trusting a Dataproc Serverless job's parallelism settings, check the
+project's actual `CPUS_ALL_REGIONS` quota (`gcloud compute regions describe <region>
+--project <project>`) rather than assuming Spark's dynamic allocation will get whatever it
+asks for -- and always re-run the upload step after editing a script that's submitted from
+a `gs://` path, since gcloud submits whatever is already staged, silently.
+
+## The same FS score means something different at 5M records than at 50K -- thresholds don't transfer across tiers
+
+**Phase:** 14
+**Decision:** `config/matching.yml`'s `thresholds` (now `upper: 9.0413`, `lower: 9.0413`) is
+dev/ci-tier only. The scale tier gets its own, separately-measured threshold, passed
+explicitly to `spark_jobs/cluster_identities.py --upper-threshold` (currently `20.5`) from
+`Makefile` and `airflow/dags/dedup_dag.py` -- not read from `matching.yml`.
+**What was found:** Before submitting the (re-tuned) clustering job, the already-computed
+`matching.pair_scores` (327,366,916 rows, scale tier) were checked directly against real
+scale-tier ground truth (`data/scale/ground_truth`, joined into BigQuery as a scratch table)
+rather than assuming the dev-tier-derived threshold still applied. At `matching.yml`'s
+threshold (then 7.8924, now known stale for an unrelated reason -- see below), scale-tier
+precision measured only **49.4%**, against dev tier's own measured >=99% at its equivalent
+cutoff. Sweeping thresholds directly against the real stored scores found the actual
+scale-tier F1-optimal cutoff around **20.5** (precision 0.965, recall 0.942, F1 0.954) --
+still meaningfully below dev tier's F1 of 0.9967 at its own optimum, and nowhere near the
+dev-tier-derived value.
+**Why the same score means something different at different scale:** `bp_coarse` doesn't
+require first-name agreement (by design, to catch first-name typos/nicknames), so within a
+`bp_coarse` block, candidate pairs can be two genuinely different people who happen to share
+`last_name_phonetic + gender + dob_year`. The FS score for such a pair depends on whether
+their *other* fields (first name, SSN) also happen to look similar -- and the absolute count
+of coincidental "different person, but several fields agree" pairs grows much faster than
+population (same mechanism as the `bp_coarse` block-size blowup above: a roughly
+fixed-cardinality key absorbing more and more of a growing population) while the count of
+*true* duplicate pairs grows only linearly with the corruption rate. The practical effect:
+at any fixed score threshold, the base rate of true-vs-coincidental matches at that score
+level shifts as population grows, so a cutoff calibrated on a 50K-record sample
+systematically under-estimates how high the cutoff needs to be at 5M.
+**A second, independent bug found along the way:** `config/matching.yml`'s committed
+threshold (7.8924) turned out to already be stale before any of the above -- it was
+calibrated against the fs_params.yml committed in Phase 6, but `config/fs_params.yml` had
+since been regenerated twice this phase (`scripts/estimate_fs_params.py`, needed once to
+refresh estimates and again after a stale local DuckDB schema forced a full dev-tier
+rebuild), and nobody re-ran the sweep and copied the new number back into `matching.yml` --
+exactly the gap its own comment warns about ("re-run the sweep... if fs_params.yml...
+changes"). Re-running `python -m mdm.evaluate --tier dev` against the current
+`fs_params.yml` gives `9.0413`, confirmed self-consistent by re-running `run_matching` and
+`run_quality_checks` for dev tier against it (all 5 quality checks still pass).
+**How to apply:** Never assume a threshold tuned at one tier is valid at another -- verify
+directly against that tier's own ground truth before trusting it for anything that costs
+money to compute against (this was checked before submitting the corrected clustering job,
+not after). More generally: any threshold or cutoff derived from a `threshold_sweep`-style
+process needs to be re-derived whenever its upstream inputs (here, `fs_params.yml`) change,
+not copied once and assumed stable.
+
+## `run_matching_bigquery.py`'s in-memory crosswalk/survivorship doesn't fit in memory at 5M records
+
+**Phase:** 14
+**Decision:** No code change -- documented as a known limitation of the current
+record-count-scaled local processing design. `scripts/run_matching_bigquery.py` remains
+verified at the ~50K-record scale it was built and tested against (Phase 13); it was not
+completed against the full 5M-record scale tier this phase.
+**What was found:** After `spark_jobs/cluster_identities.py` (Dataproc-scale, and the one
+step of this pipeline that's genuinely pair-count-scaled) succeeded, running
+`scripts/run_matching_bigquery.py --project patient-dedup-mdm` against the resulting
+5,048,389-record / 2,244,989-cluster scale-tier data was killed after its single Python
+process grew past 11.2GB resident and was still climbing, on a machine with 24GB total RAM
+and only ~6.5GB free *before* the run even started (other processes already held the rest).
+Free physical memory bottomed out around 240MB and free virtual (pagefile) memory around
+800MB before the process was stopped -- close enough to real exhaustion that continuing
+risked an uncontrolled `MemoryError` mid-run rather than a clean stop. The kill happened
+during the read/compute phase, before `write_serving_tables` issued any BigQuery writes, so
+no partial-write risk (see the write-atomicity limitation from Phase 13) was involved here.
+**Why this is a different problem from `bp_coarse` or the Dataproc quota ceiling above:**
+Those were about *pair-count-scaled* data (candidate pairs, shuffle partitions) outgrowing
+its handling at 5M records. This is about *record/cluster-count-scaled* data -- supposedly
+the cheap side of this pipeline, per this script's own docstring ("only record-count-sized
+data ... is handled here, so plain Python is enough") -- turning out not to be cheap either,
+once record count and cluster count are both in the millions: `records_by_key` (a
+dict-of-dicts built via `pandas.DataFrame.to_dict(orient="index")`, one of pandas' more
+memory-hungry conversions), `golden_records`, `field_lineage_rows`, `alternate_ids`, and
+`membership_rows` are all plain Python lists/dicts sized to the full record and cluster
+count at once, with no batching -- something Phase 13's ~50K-record verification never
+exercised at a scale where per-object Python overhead (a dict costs far more than its raw
+field bytes) would matter.
+**Why not just fix it now:** A correct fix -- restructuring `resolve_crosswalk`/
+`build_serving_tables`/`write_serving_tables` to process and write in bounded-size batches
+instead of materializing the full result set in memory -- is a real architectural change to
+code shared with the local DuckDB path (`mdm.pipeline.run_matching`, per
+PROJECT_CONSTITUTION.md's "one codebase, two backends" principle, #8), not a quick patch,
+and warrants its own design/testing pass rather than a rushed change at the end of a long
+session.
+**How to apply:** Before running this script against a real multi-million-record scale tier,
+either provision a machine with meaningfully more headroom than 24GB total (this run needed
+more than the ~17.5GB that was actually available), or do the batching rewrite first. Either
+way, verify free memory *before* starting, not just after something goes wrong -- this run's
+6.5GB of pre-existing headroom was already a warning sign the process's peak footprint didn't
+respect.
