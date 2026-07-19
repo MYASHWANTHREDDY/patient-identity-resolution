@@ -45,8 +45,8 @@ scoring:  # Phase 6
 # see Makefile's dataproc-cluster-identities target and design-decisions.md) -- not this
 # value. Re-derive both independently whenever fs_params.yml changes.
 thresholds:  # Phase 6
-  upper: 9.0413
-  lower: 9.0413
+  upper: 9.5203
+  lower: 9.5203
 
 clustering:  # Phase 7
   max_cluster_size: 6

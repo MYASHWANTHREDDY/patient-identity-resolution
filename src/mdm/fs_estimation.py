@@ -69,8 +69,14 @@ def estimate_fs_params(
 ) -> dict[str, dict[str, dict[str, float]]]:
     m_counts = _count_agreement_levels(list(true_pairs), records_by_key, nickname_index)
 
+    # sorted(), not list(): records_by_key comes from a DuckDB query with no ORDER BY, so
+    # dict insertion order (and therefore what rng.sample below actually picks, given the
+    # same seed) isn't guaranteed stable across runs -- a real reproducibility gap found
+    # while re-running the dev-tier demo (three "identical" runs produced three different
+    # thresholds: 7.8924, 9.0413, 9.5203). Sorting fixes the input order without touching
+    # sample_non_match_pairs' own seeded-but-order-sensitive sampling logic.
     non_match_pairs = sample_non_match_pairs(
-        list(records_by_key), true_pairs, sample_size, seed
+        sorted(records_by_key), true_pairs, sample_size, seed
     )
     u_counts = _count_agreement_levels(non_match_pairs, records_by_key, nickname_index)
 

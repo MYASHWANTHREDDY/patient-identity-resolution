@@ -4,101 +4,101 @@
 # weight = log2(m/u) in bits. See PROJECT_CONSTITUTION.md #11.4.
 first_name:
   exact:
-    m: 0.718968
-    u: 0.006048
-    weight: 6.8933
+    m: 0.719529
+    u: 0.006148
+    weight: 6.8708
   nickname:
-    m: 0.071542
-    u: 0.0009
-    weight: 6.3132
+    m: 0.07147
+    u: 0.0014
+    weight: 5.6743
   near:
-    m: 0.201496
-    u: 0.003099
-    weight: 6.0228
+    m: 0.201213
+    u: 0.002499
+    weight: 6.3311
   similar:
-    m: 0.004997
-    u: 0.004449
-    weight: 0.1677
+    m: 0.00479
+    u: 0.004199
+    weight: 0.1901
   different:
     m: 0.002964
-    u: 0.985454
-    weight: -8.3773
+    u: 0.985704
+    weight: -8.3777
   missing:
     m: 3.4e-05
     u: 5.0e-05
-    weight: -0.5365
+    weight: -0.5366
 last_name:
   exact:
-    m: 0.786512
-    u: 0.003149
-    weight: 7.9644
+    m: 0.789104
+    u: 0.002499
+    weight: 8.3026
   nickname:
     m: 3.4e-05
     u: 5.0e-05
-    weight: -0.5365
+    weight: -0.5366
   near:
-    m: 0.208112
-    u: 0.00145
-    weight: 7.1656
+    m: 0.206003
+    u: 0.00105
+    weight: 7.6166
   similar:
-    m: 0.003102
-    u: 0.003849
-    weight: -0.3114
+    m: 0.002619
+    u: 0.004149
+    weight: -0.6637
   different:
-    m: 0.002206
-    u: 0.991453
-    weight: -8.8123
+    m: 0.002205
+    u: 0.992202
+    weight: -8.8134
   missing:
     m: 3.4e-05
     u: 5.0e-05
-    weight: -0.5365
+    weight: -0.5366
 dob:
   exact:
-    m: 0.782273
+    m: 0.784589
     u: 5.0e-05
-    weight: 13.9339
+    weight: 13.9382
   transposed:
-    m: 0.078951
+    m: 0.078431
     u: 5.0e-05
-    weight: 10.6252
+    weight: 10.6157
   one_component_off:
-    m: 0.130505
-    u: 0.004549
-    weight: 4.8425
+    m: 0.129432
+    u: 0.003849
+    weight: 5.0716
   year_only:
-    m: 0.007754
-    u: 0.009647
-    weight: -0.3152
+    m: 0.006858
+    u: 0.007848
+    weight: -0.1946
   different:
-    m: 0.000482
-    u: 0.985654
-    weight: -10.9965
+    m: 0.000655
+    u: 0.988154
+    weight: -10.5596
   missing:
     m: 3.4e-05
     u: 5.0e-05
-    weight: -0.5365
+    weight: -0.5366
 ssn:
   exact:
-    m: 0.29981
+    m: 0.303005
     u: 5.0e-05
-    weight: 12.5501
+    weight: 12.5653
   different:
     m: 3.4e-05
-    u: 0.395891
-    weight: -13.4877
+    u: 0.40054
+    weight: -13.5046
   missing:
-    m: 0.700155
-    u: 0.604059
-    weight: 0.213
+    m: 0.69696
+    u: 0.59941
+    weight: 0.2175
 gender:
   exact:
     m: 0.999931
-    u: 0.496026
-    weight: 1.0114
+    u: 0.498325
+    weight: 1.0047
   different:
     m: 3.4e-05
-    u: 0.503924
-    weight: -13.8358
+    u: 0.501625
+    weight: -13.8292
   missing:
     m: 3.4e-05
     u: 5.0e-05
