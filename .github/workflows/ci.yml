@@ -25,6 +25,13 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -e .
 
+      # dbt/profiles.yml is gitignored (README's Quick Start: `cp dbt/profiles.yml.example
+      # dbt/profiles.yml`) -- every dbt invocation below needs it. The `dev` target it
+      # points at needs no secrets (just DUCKDB_PATH, set per-command); only `prod`
+      # (BigQuery, never used at ci tier) needs GCP env vars.
+      - name: Set up dbt profile
+        run: cp dbt/profiles.yml.example dbt/profiles.yml
+
       - name: Lint
         run: ruff check .
 
