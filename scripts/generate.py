@@ -113,83 +113,89 @@ def run(
         for i, (start, end) in enumerate(ranges)
     ]
 
-    vendor_shards: dict[str, list[list[dict]]] = {v: [None] * len(ranges) for v in VENDORS}
-    ground_truth_shards: list[list[dict] | None] = [None] * len(ranges)
-    fact_shards: dict[str, dict[str, list[list[dict]]]] = {
-        domain: {v: [None] * len(ranges) for v in vendors}
-        for domain, (vendors, _schema) in FACT_TABLE_SPECS.items()
-    }
-    vendor_id_map_shards: list[list[dict] | None] = [None] * len(ranges)
-    matchpath_shards: dict[str, list[list[dict]]] = {
-        domain: [None] * len(ranges) for domain in MATCHPATH_TABLE_SPECS
-    }
-    matchpath_gt_shards: list[list[dict] | None] = [None] * len(ranges)
+    out_root = out_dir / tier_name
+
+    # Written as each shard completes, not accumulated across every shard before writing
+    # anything -- holding all six domains' rows for the *entire* identity population in
+    # memory at once grew past available memory at the scale tier's 2.4M identities (found
+    # generating a real scale-tier run; see docs/design-decisions.md). Only small per-domain
+    # *counts* accumulate across the whole run now, never row data -- peak memory is one
+    # shard's worth of rows (chunk_size identities), the same regardless of tier size.
+    record_counts: dict[str, int] = dict.fromkeys(VENDORS, 0)
+    fact_counts: dict[str, dict[str, int]] = {}
+    if with_facts:
+        for domain, (vendors, _schema) in FACT_TABLE_SPECS.items():
+            fact_counts[domain] = dict.fromkeys(vendors, 0)
+        fact_counts["vendor_id_map"] = {"total": 0}
+        for domain in MATCHPATH_TABLE_SPECS:
+            fact_counts[domain] = {"total": 0}
+        fact_counts["matchpath_ground_truth"] = {"total": 0}
 
     with ProcessPoolExecutor(max_workers=workers) as executor:
         for shard_index, (vendor_rows, gt_rows, fact_rows) in enumerate(
             executor.map(generate_shard_task, tasks)
         ):
             for vendor in VENDORS:
-                vendor_shards[vendor][shard_index] = vendor_rows[vendor]
-            ground_truth_shards[shard_index] = gt_rows
-            for domain, (vendors, _schema) in FACT_TABLE_SPECS.items():
+                rows = vendor_rows[vendor]
+                write_parquet(
+                    out_root / "raw" / vendor.lower() / f"part-{shard_index:05d}.parquet",
+                    rows,
+                    VENDOR_SCHEMAS[vendor],
+                )
+                record_counts[vendor] += len(rows)
+
+            write_parquet(
+                out_root / "ground_truth" / f"part-{shard_index:05d}.parquet",
+                gt_rows,
+                GROUND_TRUTH_SCHEMA,
+            )
+
+            if not with_facts:
+                continue
+
+            for domain, (vendors, schema) in FACT_TABLE_SPECS.items():
                 for vendor in vendors:
-                    fact_shards[domain][vendor][shard_index] = fact_rows[domain][vendor]
-            vendor_id_map_shards[shard_index] = fact_rows["vendor_id_map"]
-            for domain in MATCHPATH_TABLE_SPECS:
-                matchpath_shards[domain][shard_index] = fact_rows[domain]
-            matchpath_gt_shards[shard_index] = fact_rows["matchpath_ground_truth"]
+                    rows = fact_rows[domain][vendor]
+                    write_parquet(
+                        out_root
+                        / "raw"
+                        / f"{vendor.lower()}_{domain}"
+                        / f"part-{shard_index:05d}.parquet",
+                        rows,
+                        schema,
+                    )
+                    fact_counts[domain][vendor] += len(rows)
 
-    out_root = out_dir / tier_name
-    for vendor in VENDORS:
-        vendor_dir = out_root / "raw" / vendor.lower()
-        for shard_index, rows in enumerate(vendor_shards[vendor]):
+            vid_rows = fact_rows["vendor_id_map"]
             write_parquet(
-                vendor_dir / f"part-{shard_index:05d}.parquet", rows, VENDOR_SCHEMAS[vendor]
+                out_root / "raw" / "vendor_id_map" / f"part-{shard_index:05d}.parquet",
+                vid_rows,
+                VENDOR_ID_MAP_SCHEMA,
             )
+            fact_counts["vendor_id_map"]["total"] += len(vid_rows)
 
-    gt_dir = out_root / "ground_truth"
-    for shard_index, rows in enumerate(ground_truth_shards):
-        write_parquet(gt_dir / f"part-{shard_index:05d}.parquet", rows, GROUND_TRUTH_SCHEMA)
+            # Phase 20 match-path domains: pharmacy_info and lab_identity are raw source
+            # records (no shared ID with anything -- real matching resolves them later),
+            # lab_results is the transactional table hanging off lab_identity's
+            # source_record_id. Their ground truth is written to matchpath_ground_truth, a
+            # top-level directory sibling to (not merged into) ground_truth/, so it can
+            # never be accidentally loaded into the core ground_truth table (see
+            # PROJECT_CONSTITUTION.md Phase 20).
+            for domain, schema in MATCHPATH_TABLE_SPECS.items():
+                rows = fact_rows[domain]
+                write_parquet(
+                    out_root / "raw" / domain / f"part-{shard_index:05d}.parquet", rows, schema
+                )
+                fact_counts[domain]["total"] += len(rows)
 
-    fact_counts: dict[str, dict[str, int]] = {}
-    if with_facts:
-        for domain, (vendors, schema) in FACT_TABLE_SPECS.items():
-            fact_counts[domain] = {}
-            for vendor in vendors:
-                domain_dir = out_root / "raw" / f"{vendor.lower()}_{domain}"
-                shards = fact_shards[domain][vendor]
-                for shard_index, rows in enumerate(shards):
-                    write_parquet(domain_dir / f"part-{shard_index:05d}.parquet", rows, schema)
-                fact_counts[domain][vendor] = sum(len(r) for r in shards)
-
-        vid_dir = out_root / "raw" / "vendor_id_map"
-        for shard_index, rows in enumerate(vendor_id_map_shards):
-            write_parquet(vid_dir / f"part-{shard_index:05d}.parquet", rows, VENDOR_ID_MAP_SCHEMA)
-        fact_counts["vendor_id_map"] = {"total": sum(len(r) for r in vendor_id_map_shards)}
-
-        # Phase 20 match-path domains: pharmacy_info and lab_identity are raw source
-        # records (no shared ID with anything -- real matching resolves them later),
-        # lab_results is the transactional table hanging off lab_identity's
-        # source_record_id. Their ground truth is written to matchpath_ground_truth, a
-        # top-level directory sibling to (not merged into) ground_truth/, so it can never
-        # be accidentally loaded into the core ground_truth table (see
-        # PROJECT_CONSTITUTION.md Phase 20).
-        for domain, schema in MATCHPATH_TABLE_SPECS.items():
-            domain_dir = out_root / "raw" / domain
-            shards = matchpath_shards[domain]
-            for shard_index, rows in enumerate(shards):
-                write_parquet(domain_dir / f"part-{shard_index:05d}.parquet", rows, schema)
-            fact_counts[domain] = {"total": sum(len(r) for r in shards)}
-
-        matchpath_gt_dir = out_root / "matchpath_ground_truth"
-        for shard_index, rows in enumerate(matchpath_gt_shards):
+            mp_gt_rows = fact_rows["matchpath_ground_truth"]
             write_parquet(
-                matchpath_gt_dir / f"part-{shard_index:05d}.parquet", rows, GROUND_TRUTH_SCHEMA
+                out_root / "matchpath_ground_truth" / f"part-{shard_index:05d}.parquet",
+                mp_gt_rows,
+                GROUND_TRUTH_SCHEMA,
             )
-        fact_counts["matchpath_ground_truth"] = {"total": sum(len(r) for r in matchpath_gt_shards)}
+            fact_counts["matchpath_ground_truth"]["total"] += len(mp_gt_rows)
 
-    record_counts = {vendor: sum(len(r) for r in rows) for vendor, rows in vendor_shards.items()}
     return {
         "tier": tier_name,
         "num_identities": tier.num_identities,

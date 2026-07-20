@@ -1354,3 +1354,64 @@ failure documented since Phase 12 (`tests/unit/test_backends_spark.py`), unrelat
 work -- so its compatibility rests on the schema/argument-contract check above (verified)
 plus its already-existing test coverage for the unchanged scoring logic itself, not a fresh
 end-to-end local run.
+
+## `synthesize_identity`'s DOB silently depended on `datetime.now()` since Phase 1 -- found only when two real-world days separated two regenerations
+
+**Phase:** 1 (bug present since), found and fixed while preparing to run the Phase 20
+match-path scale test for real
+**What was found:** `src/mdm/generator/identity.py` called
+`faker.date_of_birth(minimum_age=1, maximum_age=95)`. Faker computes that internally as
+`datetime.now().date()` minus a random age -- meaning, despite every other input
+(`identity_index`, seed, tier) being identical, the exact calendar date it returns silently
+depends on *which real day the generator happened to run on*. Invisible for the entire
+project's life so far because no test or workflow had ever regenerated the same tier twice
+with enough real elapsed time between the two runs to see it move. Found by comparing a
+fresh regeneration against the already-on-disk dev-tier data while costing out the
+Phase 20 scale test: the *same* identity (`ID00000000`, an "exact" appearance with zero
+noise applied) had DOB `1933-12-13` in data generated two days earlier vs. `1933-12-14`
+fresh -- a one-day drift matching the real time elapsed between the two runs almost
+exactly, not random noise (which never touches an exact appearance) and not a code change
+(confirmed by `git stash`-ing back to the exact committed version and reproducing the same
+drift with zero diff against `HEAD`).
+**Why this matters more than a cosmetic date shift:** the 5,048,389-row core population
+already loaded in BigQuery (Phase 14, generated July 18) has DOB values baked in relative
+to *that* day. Match-path matching's DOB comparator does exact/transposed/year-only
+comparison -- generating fresh match-path data today against that population would have
+scored genuinely-matching pairs as DOB mismatches purely from clock drift, artificially
+depressing recall on a test that would look like it was measuring match-path quality but
+was actually measuring how many days had passed since Phase 14's original run.
+**How to apply:** Added `DOB_REFERENCE_DATE = date(2026, 1, 1)` (matching
+`facts.py`/`matchpath.py`'s existing `DEFAULT_WINDOW_END`) and a `_synthesize_dob(rng)`
+helper that computes the age-appropriate date range against that fixed anchor and draws a
+uniform offset via `rng` (the already-seeded `random.Random`, not Faker's internal state) --
+the same "offset within a fixed window" pattern `mdm.generator.matchpath._random_date_within`
+already uses. Verified by regenerating dev tier twice in immediate succession
+post-fix (byte-identical) and re-running the full unit + integration suite (261 passed, only
+the 3 pre-existing Windows/PySpark failures, no new regressions). Downstream consequence,
+expected and accepted: every identity's DOB (and everything generated after it in the same
+function/appearance, since removing a `faker.*` call shifts Faker's own internal stream)
+changes from what was previously committed to disk/BigQuery -- fixing a `datetime.now()`
+dependency necessarily invalidates any previously-generated output that depended on it, the
+same way fixing Phase 19's shared-RNG bug did. The already-loaded Phase 14 core population
+needs a full fresh regeneration and reload to be consistent with this fix, not just the
+new match-path domains -- see the scale-run re-verification this fix triggered.
+
+## Generator peak memory scaled with total tier size, not shard size -- fixed by writing each shard as it completes
+
+**Phase:** 1 (pattern present since), found generating a full 5,048,389-record, six-domain
+scale-tier run for real
+**What was found:** `scripts/generate.py`'s `run()` accumulated every shard's rows, for
+every domain, into `vendor_shards`/`fact_shards`/`matchpath_shards` dicts *before* writing
+any of them to Parquet -- fine at Phase 1's three-vendor-only scope (Phase 14's real 5M
+core-only run succeeded under this pattern), but Phase 19/20 added six more domains' worth
+of per-identity data to what's held per shard, and holding *all* of it for the *entire*
+2,400,000-identity population at once raised a `MemoryError` on this machine (17.9 GB
+available) before a single Parquet file had been written.
+**How to apply:** Restructured `run()` to write each shard's output immediately as it comes
+back from `executor.map` (still processed in task-submission order, so `shard_index`
+still lines up exactly the same way), accumulating only small per-domain integer counts
+across the run rather than row data. Peak memory is now one shard's worth of rows
+(`chunk_size` identities, currently 2,000) regardless of how many identities the tier has in
+total. Verified via the existing generator determinism/worker-independence tests (all still
+pass -- output layout and content are unchanged, only *when* each shard gets written) and
+a direct dev-tier byte-comparison against the pre-refactor code path.
