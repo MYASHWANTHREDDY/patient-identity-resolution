@@ -72,3 +72,44 @@ def test_load_tier_to_duckdb_creates_queryable_schemas(tmp_path):
 def test_load_tier_to_duckdb_missing_tier_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_tier_to_duckdb(tmp_path / "does_not_exist", tmp_path / "out.duckdb")
+
+
+def test_load_tier_to_duckdb_loads_matchpath_tables_separately_from_core_ground_truth(tmp_path):
+    """Phase 20: pharmacy_info/lab_identity/lab_results land in raw_standard, and
+    matchpath_ground_truth lands in its own ground_truth.matchpath_ground_truth table --
+    never unioned into ground_truth.ground_truth, since mixing them would introduce
+    spurious "true pairs" between core and match-path records (PROJECT_CONSTITUTION.md
+    Phase 20)."""
+    tier_dir = _generate(tmp_path / "data")
+    db_path = tmp_path / "mdm.duckdb"
+
+    counts = load_tier_to_duckdb(tier_dir, db_path)
+
+    for matchpath_table in ("pharmacy_info", "lab_identity", "lab_results"):
+        parts = list((tier_dir / "raw" / matchpath_table).glob("part-*.parquet"))
+        expected = sum(pq.read_table(p).num_rows for p in parts)
+        assert counts[matchpath_table] == expected
+
+    gt_parts = list((tier_dir / "matchpath_ground_truth").glob("part-*.parquet"))
+    expected_matchpath_gt = sum(pq.read_table(p).num_rows for p in gt_parts)
+    assert counts["matchpath_ground_truth"] == expected_matchpath_gt
+
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        core_keys = {
+            r[0] for r in con.execute("SELECT record_key FROM ground_truth.ground_truth").fetchall()
+        }
+        matchpath_keys = {
+            r[0]
+            for r in con.execute(
+                "SELECT record_key FROM ground_truth.matchpath_ground_truth"
+            ).fetchall()
+        }
+        assert core_keys.isdisjoint(matchpath_keys)
+
+        lab_result_row = con.execute(
+            "SELECT source_record_id, test_code FROM raw_standard.lab_results LIMIT 1"
+        ).fetchone()
+        assert lab_result_row is not None
+    finally:
+        con.close()

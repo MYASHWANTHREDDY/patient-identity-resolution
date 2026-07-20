@@ -79,3 +79,37 @@ sources:
               - accepted_values:
                   arguments:
                     values: ["pending", "confirmed", "rejected"]
+      - name: matchpath_resolution
+        description: >
+          Phase 20: pharmacy_info/lab_identity records real-matched (not joined) against
+          conformance.patient_normalized, written by scripts/run_matchpath_matching.py.
+          Only auto-matched records appear -- review/unmatched records have no row.
+        columns:
+          - name: domain
+            tests:
+              - accepted_values:
+                  arguments:
+                    values: ["pharmacy_info", "lab_identity"]
+          - name: record_key
+            tests:
+              - unique
+              - not_null
+          - name: patient_global_id
+            tests:
+              - not_null
+              - relationships:
+                  arguments:
+                    to: source('serving_written', 'membership')
+                    field: patient_global_id
+      - name: matchpath_review_queue
+        description: >
+          Phase 20's review-band analog to review_queue -- match-path candidate pairs
+          scoring lower <= score < upper. Empty at dev/ci tier today since
+          config/matching.yml's thresholds collapse the review band to zero width (same
+          reason review_queue is empty for the core pipeline).
+        columns:
+          - name: status
+            tests:
+              - accepted_values:
+                  arguments:
+                    values: ["pending", "confirmed", "rejected"]

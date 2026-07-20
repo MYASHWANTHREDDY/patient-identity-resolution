@@ -16,7 +16,7 @@ from mdm.backends.local import load_tier_to_duckdb
 from mdm.comparators import build_nickname_index
 from mdm.evaluate import load_pair_noise_type, load_records_by_key
 from mdm.fs_estimation import estimate_fs_params
-from mdm.pipeline import run_matching
+from mdm.pipeline import run_matching, run_matchpath_matching
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DBT_PROJECT_DIR = REPO_ROOT / "dbt"
@@ -96,6 +96,10 @@ def test_snapshot_captures_a_changed_golden_record(tmp_path):
         records_by_key, true_pairs, sample_size=2000, seed=42, nickname_index=nickname_index
     )
     run_matching(str(db_path), run_id="run1", fs_params=fs_params, nickname_index=nickname_index)
+    # Phase 20: serving.fct_pharmacy_info/fct_lab_results (and their source tests) need
+    # serving.matchpath_resolution to exist before the full dbt build below -- written by
+    # run_matchpath_matching, a separate step from core run_matching (docs/domain-linking-strategy.md).
+    run_matchpath_matching(str(db_path), fs_params=fs_params, nickname_index=nickname_index)
 
     first_build = _dbt_build(profiles_dir, db_path)
     assert first_build.returncode == 0, first_build.stdout + first_build.stderr

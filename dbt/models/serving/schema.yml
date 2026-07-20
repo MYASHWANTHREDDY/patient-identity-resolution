@@ -70,3 +70,39 @@ models:
         tests:
           - unique
           - not_null
+
+  - name: fct_pharmacy_info
+    description: >
+      Phase 20 match-path fact table. One row per pharmacy_info record that real matching
+      (scripts/run_matchpath_matching.py) auto-matched to a patient_global_id -- unlike
+      fct_medical_history/fct_medical_claims/fct_pharmacy_claims, not every conformance row
+      is guaranteed to appear here (docs/domain-linking-strategy.md).
+    columns:
+      - name: patient_global_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: source('serving_written', 'membership')
+                field: patient_global_id
+      - name: source_record_id
+        tests:
+          - unique
+          - not_null
+
+  - name: fct_lab_results
+    description: >
+      Phase 20 match-path fact table. One row per test result whose parent lab_identity
+      record auto-matched to a patient_global_id.
+    columns:
+      - name: patient_global_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: source('serving_written', 'membership')
+                field: patient_global_id
+      - name: lab_result_key
+        tests:
+          - unique
+          - not_null

@@ -7,6 +7,7 @@ from mdm.generator.shard import generate_shard, plan_appearances, shard_ranges
 from mdm.generator.vendors import VENDORS
 
 NICKNAME_TABLE = {"Robert": ["Bob", "Bobby", "Rob"]}
+LOINC_CODES = ["2345-7", "2951-2", "718-7", "4548-4", "1742-6"]
 
 
 @pytest.mark.parametrize(
@@ -88,3 +89,57 @@ def test_generate_shard_produces_all_five_noise_types_at_scale():
     noise_types = Counter(row["noise_type"] for row in ground_truth_rows)
     for noise_type in ("exact", "nickname", "typo_name", "dob_error", "missing_ssn"):
         assert noise_types[noise_type] > 0, f"{noise_type} never occurred"
+
+
+def test_generate_shard_without_loinc_codes_skips_matchpath():
+    """loinc_codes=None (this function's default) is what every pre-Phase-20 caller still
+    gets -- match-path generation must stay fully inert unless a caller opts in, the same
+    contract icd10cm_codes/hcpcs_codes/ndc_codes already have for Phase 19."""
+    _vendor_rows, _ground_truth_rows, fact_rows = generate_shard(
+        0, 0, 300, seed_base=42, nickname_table=NICKNAME_TABLE
+    )
+    assert fact_rows["pharmacy_info"] == []
+    assert fact_rows["lab_identity"] == []
+    assert fact_rows["lab_results"] == []
+    assert fact_rows["matchpath_ground_truth"] == []
+
+
+def test_generate_shard_matchpath_is_deterministic():
+    result_a = generate_shard(
+        0, 0, 300, seed_base=42, nickname_table=NICKNAME_TABLE, loinc_codes=LOINC_CODES
+    )
+    result_b = generate_shard(
+        0, 0, 300, seed_base=42, nickname_table=NICKNAME_TABLE, loinc_codes=LOINC_CODES
+    )
+    assert result_a == result_b
+
+
+def test_generate_shard_matchpath_does_not_change_member_domain_output():
+    """Regression guard for the Faker-sharing bug: enabling match-path generation
+    (loinc_codes not None) must not change vendor_rows/ground_truth_rows at all, since
+    matchpath.py now uses its own independently-seeded Faker instance rather than the
+    member domain's shared one."""
+    without_matchpath = generate_shard(0, 0, 300, seed_base=42, nickname_table=NICKNAME_TABLE)
+    with_matchpath = generate_shard(
+        0, 0, 300, seed_base=42, nickname_table=NICKNAME_TABLE, loinc_codes=LOINC_CODES
+    )
+    assert without_matchpath[0] == with_matchpath[0]  # vendor_rows
+    assert without_matchpath[1] == with_matchpath[1]  # ground_truth_rows
+
+
+def test_generate_shard_matchpath_ground_truth_disjoint_from_core_ground_truth():
+    _vendor_rows, ground_truth_rows, fact_rows = generate_shard(
+        0, 0, 300, seed_base=42, nickname_table=NICKNAME_TABLE, loinc_codes=LOINC_CODES
+    )
+    core_keys = {row["record_key"] for row in ground_truth_rows}
+    matchpath_keys = {row["record_key"] for row in fact_rows["matchpath_ground_truth"]}
+    assert matchpath_keys, "expected at least one match-path record at this scale"
+    assert core_keys.isdisjoint(matchpath_keys)
+
+
+def test_generate_shard_lab_results_reference_real_loinc_codes():
+    _vendor_rows, _ground_truth_rows, fact_rows = generate_shard(
+        0, 0, 300, seed_base=42, nickname_table=NICKNAME_TABLE, loinc_codes=LOINC_CODES
+    )
+    assert fact_rows["lab_results"]
+    assert all(row["test_code"] in LOINC_CODES for row in fact_rows["lab_results"])

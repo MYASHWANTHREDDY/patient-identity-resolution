@@ -171,6 +171,240 @@ def run_matching(
         con.close()
 
 
+MATCHPATH_DOMAINS = ("pharmacy_info", "lab_identity")
+
+# Same non-SSN passes as dbt/models/blocking/block_keys.sql, minus bp_ssn -- match-path
+# records never carry an ssn (has_ssn_field=False in src/mdm/generator/matchpath.py), so
+# that pass would never fire here anyway (docs/domain-linking-strategy.md). Kept as a
+# Python dict rather than new dbt models per the Phase 20 design decision: this asymmetric
+# join (match-path records against the already-built conformance.patient_normalized) only
+# runs once, after run_matching has already produced serving.crosswalk, so it belongs in
+# this script-level orchestration rather than dbt's regular build graph.
+_MATCHPATH_BLOCKING_PASSES: dict[str, tuple[str, str]] = {
+    "bp_dob_lname": (
+        "dob is not null and last_name_phonetic is not null",
+        "cast(dob as varchar) || '|' || last_name_phonetic",
+    ),
+    "bp_year_names": (
+        "dob_year is not null and first_name_phonetic is not null "
+        "and last_name_phonetic is not null",
+        "cast(dob_year as varchar) || '|' || first_name_phonetic || '|' || last_name_phonetic",
+    ),
+    "bp_coarse": (
+        "last_name_phonetic is not null and gender is not null and dob_year is not null",
+        "last_name_phonetic || '|' || gender || '|' || cast(dob_year as varchar)",
+    ),
+}
+
+
+def _matchpath_block_keys_cte(relation: str) -> str:
+    parts = [
+        f"select record_key, '{pass_name}' as blocking_pass, {key_expr} as block_key "
+        f"from {relation} where {where_clause}"
+        for pass_name, (where_clause, key_expr) in _MATCHPATH_BLOCKING_PASSES.items()
+    ]
+    return " union all ".join(parts)
+
+
+def asymmetric_candidate_pairs(con, domains=MATCHPATH_DOMAINS, *, max_block_size: int):
+    """Match-path records (one of `domains`) blocked against conformance.patient_normalized
+    -- an asymmetric join, unlike matching.candidate_pairs.sql's self-join, since match-path
+    records never merge with each other, only resolve against the core population. Oversized
+    blocks (measured on the core side, since that's the population each match-path record's
+    block search would otherwise flood) are excluded the same way block_stats.sql excludes
+    them from the symmetric case."""
+    import pandas as pd
+
+    core_cte = _matchpath_block_keys_cte("conformance.patient_normalized")
+    frames = []
+    for domain in domains:
+        matchpath_cte = _matchpath_block_keys_cte(f"conformance.{domain}_normalized")
+        query = f"""
+            with core_keys as ({core_cte}),
+            matchpath_keys as ({matchpath_cte}),
+            block_sizes as (
+                select blocking_pass, block_key, count(*) as record_count
+                from core_keys group by 1, 2
+            )
+            select distinct
+                '{domain}' as domain,
+                m.record_key as matchpath_record_key,
+                c.record_key as core_record_key
+            from matchpath_keys m
+            join core_keys c on m.blocking_pass = c.blocking_pass and m.block_key = c.block_key
+            join block_sizes s on s.blocking_pass = c.blocking_pass and s.block_key = c.block_key
+            where s.record_count <= {max_block_size}
+        """
+        frames.append(con.execute(query).df())
+    if not frames:
+        return pd.DataFrame(columns=["domain", "matchpath_record_key", "core_record_key"])
+    return pd.concat(frames, ignore_index=True)
+
+
+def run_matchpath_matching(
+    db_path: str,
+    *,
+    fs_params: dict | None = None,
+    nickname_index: dict[str, str] | None = None,
+    max_block_size: int | None = None,
+) -> dict:
+    """Resolves pharmacy_info/lab_identity records (Phase 20, PROJECT_CONSTITUTION.md) to an
+    *existing* patient_global_id via real matching -- unlike run_matching above, this never
+    creates new identities or merges clusters, since a match-path record either belongs to
+    someone already known to the core population or it doesn't resolve at all (not every
+    record is guaranteed a match here, unlike Phase 19's join-path fact domains). Requires
+    run_matching to have already populated serving.crosswalk."""
+    import duckdb
+
+    from mdm.config import load_config
+
+    fs_params = fs_params if fs_params is not None else load_fs_params()
+    nickname_index = nickname_index if nickname_index is not None else load_nickname_index()
+    thresholds = load_thresholds()
+    if max_block_size is None:
+        max_block_size = int(load_config()["blocking"]["max_block_size"])
+
+    con = duckdb.connect(db_path)
+    try:
+        con.execute("CREATE SCHEMA IF NOT EXISTS serving")
+
+        crosswalk_rows = con.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'serving' AND table_name = 'crosswalk'"
+        ).fetchall()
+        if not crosswalk_rows:
+            raise RuntimeError(
+                "serving.crosswalk does not exist -- run scripts/run_matching.py before "
+                "scripts/run_matchpath_matching.py (Phase 20 resolves match-path records "
+                "against an already-built core crosswalk, never before it)."
+            )
+        crosswalk_df = con.execute(
+            "SELECT record_key, patient_global_id FROM serving.crosswalk"
+        ).df()
+        record_to_pgid = dict(
+            zip(crosswalk_df["record_key"], crosswalk_df["patient_global_id"], strict=False)
+        )
+
+        core_df = con.execute(
+            "SELECT record_key, first_name, last_name, dob, gender, ssn FROM "
+            "conformance.patient_normalized"
+        ).df()
+        core_records = core_df.set_index("record_key").to_dict(orient="index")
+        for key, record in core_records.items():
+            record["record_key"] = key
+        sanitize_nan(core_records)
+
+        matchpath_records: dict[str, dict] = {}
+        record_domain: dict[str, str] = {}
+        for domain in MATCHPATH_DOMAINS:
+            df = con.execute(
+                f"SELECT record_key, source_record_id, first_name, last_name, dob, gender, "
+                f"ssn FROM conformance.{domain}_normalized"
+            ).df()
+            recs = df.set_index("record_key").to_dict(orient="index")
+            for key, record in recs.items():
+                record["record_key"] = key
+                matchpath_records[key] = record
+                record_domain[key] = domain
+        sanitize_nan(matchpath_records)
+
+        candidate_pairs = asymmetric_candidate_pairs(con, max_block_size=max_block_size)
+
+        best_auto_match: dict[str, tuple[float, str]] = {}
+        best_review: dict[str, tuple[float, str]] = {}
+        for row in candidate_pairs.itertuples(index=False):
+            mp_key = row.matchpath_record_key
+            core_key = row.core_record_key
+            agreement = compare_record_pair(
+                matchpath_records[mp_key], core_records[core_key], nickname_index=nickname_index
+            )
+            score = score_fs(agreement, fs_params)
+            decision = decide(score, upper=thresholds["upper"], lower=thresholds["lower"])
+            if decision == AUTO_MATCH:
+                current = best_auto_match.get(mp_key)
+                if current is None or score > current[0]:
+                    best_auto_match[mp_key] = (score, core_key)
+            elif decision == REVIEW:
+                current = best_review.get(mp_key)
+                if current is None or score > current[0]:
+                    best_review[mp_key] = (score, core_key)
+
+        resolution_rows = []
+        for mp_key, (score, core_key) in best_auto_match.items():
+            pgid = record_to_pgid.get(core_key)
+            if pgid is None:
+                continue  # defensive: every core record should have a crosswalk entry
+            resolution_rows.append(
+                {
+                    "domain": record_domain[mp_key],
+                    "record_key": mp_key,
+                    "source_record_id": matchpath_records[mp_key]["source_record_id"],
+                    "patient_global_id": pgid,
+                    "matched_core_record_key": core_key,
+                    "match_score": score,
+                }
+            )
+
+        # Only records that never cleared auto_match go to review -- an auto-matched record
+        # doesn't also need human review (mirrors run_matching's review_pairs, which likewise
+        # only ever holds pairs decide() called REVIEW, never AUTO_MATCH pairs).
+        review_rows = [
+            {
+                "domain": record_domain[mp_key],
+                "record_key": mp_key,
+                "candidate_core_record_key": core_key,
+                "score": score,
+                "status": "pending",
+            }
+            for mp_key, (score, core_key) in best_review.items()
+            if mp_key not in best_auto_match
+        ]
+
+        _write_matchpath_tables(con, resolution_rows, review_rows)
+
+        num_matchpath_records = len(matchpath_records)
+        return {
+            "num_matchpath_records": num_matchpath_records,
+            "num_candidate_pairs": len(candidate_pairs),
+            "num_auto_matched": len(resolution_rows),
+            "num_review": len(review_rows),
+            "num_unmatched": num_matchpath_records - len(resolution_rows) - len(review_rows),
+        }
+    finally:
+        con.close()
+
+
+def _write_matchpath_tables(con, resolution_rows: list[dict], review_rows: list[dict]) -> None:
+    resolution_columns = [
+        "domain",
+        "record_key",
+        "source_record_id",
+        "patient_global_id",
+        "matched_core_record_key",
+        "match_score",
+    ]
+    resolution_df = (
+        pd.DataFrame(resolution_rows)[resolution_columns]
+        if resolution_rows
+        else pd.DataFrame(columns=resolution_columns)
+    )
+    con.register("matchpath_resolution_df", resolution_df)
+    con.execute(
+        "CREATE OR REPLACE TABLE serving.matchpath_resolution AS SELECT * FROM matchpath_resolution_df"
+    )
+
+    review_columns = ["domain", "record_key", "candidate_core_record_key", "score", "status"]
+    review_df = (
+        pd.DataFrame(review_rows)[review_columns]
+        if review_rows
+        else pd.DataFrame(columns=review_columns)
+    )
+    con.register("matchpath_review_df", review_df)
+    con.execute(
+        "CREATE OR REPLACE TABLE serving.matchpath_review_queue AS SELECT * FROM matchpath_review_df"
+    )
+
+
 def build_serving_tables(new_crosswalk, records_by_key, thresholds):
     """Cluster membership + record data -> golden records/lineage/alternate-ids/membership
     rows. Pure and backend-agnostic (PROJECT_CONSTITUTION.md #8): shared by run_matching

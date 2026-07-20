@@ -29,9 +29,14 @@ from mdm.generator.facts import (
     PHARMACY_CLAIMS_VENDORS,
     VENDOR_ID_MAP_SCHEMA,
 )
+from mdm.generator.matchpath import (
+    LAB_IDENTITY_SCHEMA,
+    LAB_RESULTS_SCHEMA,
+    PHARMACY_INFO_SCHEMA,
+)
 from mdm.generator.shard import CHUNK_SIZE, generate_shard_task, shard_ranges
 from mdm.generator.vendors import GROUND_TRUTH_SCHEMA, VENDOR_SCHEMAS, VENDORS
-from mdm.reference_codes import load_hcpcs, load_icd10cm, load_ndc
+from mdm.reference_codes import load_hcpcs, load_icd10cm, load_loinc, load_ndc
 
 DEFAULT_NICKNAME_TABLE_PATH = REPO_ROOT / "config" / "nicknames.yml"
 DEFAULT_OUT_DIR = REPO_ROOT / "data"
@@ -40,6 +45,16 @@ FACT_TABLE_SPECS = {
     "medical_history": (MEDICAL_HISTORY_VENDORS, MEDICAL_HISTORY_SCHEMA),
     "medical_claims": (MEDICAL_CLAIMS_VENDORS, MEDICAL_CLAIMS_SCHEMA),
     "pharmacy_claims": (PHARMACY_CLAIMS_VENDORS, PHARMACY_CLAIMS_SCHEMA),
+}
+
+# Phase 20 match-path domains: exactly one source vendor each (unlike Phase 19's
+# FACT_TABLE_SPECS, which each span 2-3 vendors), so raw output lives at
+# raw/{domain}/ rather than raw/{vendor}_{domain}/ -- see mdm.generator.matchpath's
+# module docstring for why no cross-vendor schema reconciliation applies here.
+MATCHPATH_TABLE_SPECS = {
+    "pharmacy_info": PHARMACY_INFO_SCHEMA,
+    "lab_identity": LAB_IDENTITY_SCHEMA,
+    "lab_results": LAB_RESULTS_SCHEMA,
 }
 
 
@@ -81,9 +96,20 @@ def run(
     icd10cm_codes = list(load_icd10cm()) if with_facts else None
     hcpcs_codes = list(load_hcpcs()) if with_facts else None
     ndc_codes = list(load_ndc()) if with_facts else None
+    loinc_codes = list(load_loinc()) if with_facts else None
 
     tasks = [
-        (i, start, end, seed, nickname_table, icd10cm_codes, hcpcs_codes, ndc_codes)
+        (
+            i,
+            start,
+            end,
+            seed,
+            nickname_table,
+            icd10cm_codes,
+            hcpcs_codes,
+            ndc_codes,
+            loinc_codes,
+        )
         for i, (start, end) in enumerate(ranges)
     ]
 
@@ -94,6 +120,10 @@ def run(
         for domain, (vendors, _schema) in FACT_TABLE_SPECS.items()
     }
     vendor_id_map_shards: list[list[dict] | None] = [None] * len(ranges)
+    matchpath_shards: dict[str, list[list[dict]]] = {
+        domain: [None] * len(ranges) for domain in MATCHPATH_TABLE_SPECS
+    }
+    matchpath_gt_shards: list[list[dict] | None] = [None] * len(ranges)
 
     with ProcessPoolExecutor(max_workers=workers) as executor:
         for shard_index, (vendor_rows, gt_rows, fact_rows) in enumerate(
@@ -106,6 +136,9 @@ def run(
                 for vendor in vendors:
                     fact_shards[domain][vendor][shard_index] = fact_rows[domain][vendor]
             vendor_id_map_shards[shard_index] = fact_rows["vendor_id_map"]
+            for domain in MATCHPATH_TABLE_SPECS:
+                matchpath_shards[domain][shard_index] = fact_rows[domain]
+            matchpath_gt_shards[shard_index] = fact_rows["matchpath_ground_truth"]
 
     out_root = out_dir / tier_name
     for vendor in VENDORS:
@@ -137,6 +170,29 @@ def run(
             "total": sum(len(r) for r in vendor_id_map_shards)
         }
 
+        # Phase 20 match-path domains: pharmacy_info and lab_identity are raw source
+        # records (no shared ID with anything -- real matching resolves them later),
+        # lab_results is the transactional table hanging off lab_identity's
+        # source_record_id. Their ground truth is written to matchpath_ground_truth, a
+        # top-level directory sibling to (not merged into) ground_truth/, so it can never
+        # be accidentally loaded into the core ground_truth table (see
+        # PROJECT_CONSTITUTION.md Phase 20).
+        for domain, schema in MATCHPATH_TABLE_SPECS.items():
+            domain_dir = out_root / "raw" / domain
+            shards = matchpath_shards[domain]
+            for shard_index, rows in enumerate(shards):
+                write_parquet(domain_dir / f"part-{shard_index:05d}.parquet", rows, schema)
+            fact_counts[domain] = {"total": sum(len(r) for r in shards)}
+
+        matchpath_gt_dir = out_root / "matchpath_ground_truth"
+        for shard_index, rows in enumerate(matchpath_gt_shards):
+            write_parquet(
+                matchpath_gt_dir / f"part-{shard_index:05d}.parquet", rows, GROUND_TRUTH_SCHEMA
+            )
+        fact_counts["matchpath_ground_truth"] = {
+            "total": sum(len(r) for r in matchpath_gt_shards)
+        }
+
     record_counts = {vendor: sum(len(r) for r in rows) for vendor, rows in vendor_shards.items()}
     return {
         "tier": tier_name,
@@ -159,8 +215,9 @@ def main(argv: list[str] | None = None) -> dict:
     parser.add_argument(
         "--no-facts",
         action="store_true",
-        help="Skip medical_history/medical_claims/pharmacy_claims generation (Phase 19) -- "
-        "member/eligibility data only, matching this script's pre-Phase-19 behavior.",
+        help="Skip medical_history/medical_claims/pharmacy_claims generation (Phase 19) and "
+        "pharmacy_info/lab_identity/lab_results generation (Phase 20) -- member/eligibility "
+        "data only, matching this script's pre-Phase-19 behavior.",
     )
     args = parser.parse_args(argv)
 

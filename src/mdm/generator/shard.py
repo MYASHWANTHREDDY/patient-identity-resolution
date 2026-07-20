@@ -23,6 +23,13 @@ from mdm.generator.facts import (
     mint_pbm_member_id,
 )
 from mdm.generator.identity import synthesize_identity
+from mdm.generator.matchpath import (
+    LAB_APPEARANCE_PROB,
+    PHARMACY_INFO_APPEARANCE_PROB,
+    generate_lab_identity_appearance,
+    generate_lab_results,
+    generate_pharmacy_info_appearance,
+)
 from mdm.generator.noise import apply_noise, choose_requested_noise_type
 from mdm.generator.vendors import VENDOR_HAS_SSN, VENDORS, render_record
 
@@ -72,6 +79,10 @@ def _empty_fact_rows() -> dict[str, dict[str, list[dict]] | list[dict]]:
         "medical_claims": {v: [] for v in MEDICAL_CLAIMS_VENDORS},
         "pharmacy_claims": {v: [] for v in PHARMACY_CLAIMS_VENDORS},
         "vendor_id_map": [],
+        "pharmacy_info": [],
+        "lab_identity": [],
+        "lab_results": [],
+        "matchpath_ground_truth": [],
     }
 
 
@@ -84,15 +95,26 @@ def generate_shard(
     icd10cm_codes: list[str] | None = None,
     hcpcs_codes: list[str] | None = None,
     ndc_codes: list[str] | None = None,
+    loinc_codes: list[str] | None = None,
 ) -> tuple[dict[str, list[dict]], list[dict], dict]:
-    """icd10cm_codes/hcpcs_codes/ndc_codes are None in tests that only care about the
-    member domain; fact-domain generation is skipped entirely when they're absent rather
-    than failing, since not every caller needs Phase 19's fact tables (P7: this function's
-    original member-only behavior stays available, not silently changed underneath it)."""
+    """icd10cm_codes/hcpcs_codes/ndc_codes/loinc_codes are None in tests that only care
+    about the member domain; fact-domain and match-path generation are each skipped
+    entirely when their inputs are absent rather than failing, since not every caller needs
+    Phase 19/20's tables (P7: this function's original member-only behavior stays
+    available, not silently changed underneath it)."""
     shard_seed = seed_base + shard_index
     faker = Faker()
     faker.seed_instance(shard_seed)
     rng = random.Random(shard_seed)
+    # Independently seeded, mirroring facts_rng/matchpath_rng below -- match-path
+    # generation calls faker.address()/faker.phone_number(), and Faker keeps its own
+    # internal RNG state on the instance. Sharing the member-domain `faker` here would
+    # reintroduce exactly the Phase 19 class of bug (this time via Faker's state instead
+    # of random.Random's): found by testing (ci-tier record counts and per-vendor totals
+    # shifted -- 5043 records before this fix vs. 5040 after -- even though matchpath_rng
+    # was already a separate random.Random stream).
+    matchpath_faker = Faker()
+    matchpath_faker.seed_instance(shard_seed + 2_000_000)
     # Independently seeded, not a second use of `rng` -- fact generation draws a different
     # number of random values per identity depending on _record_count's outcome, and if it
     # shared `rng` with the member-domain loop below, that would shift every *later*
@@ -103,8 +125,12 @@ def generate_shard(
     # member-domain output for the same identities (found by testing: they didn't, before
     # this fix -- record counts differed between the two).
     facts_rng = random.Random(shard_seed + 1_000_000)
+    # A third independent stream, same reasoning as facts_rng above -- match-path generation
+    # (Phase 20) must not perturb either the member domain or Phase 19's fact domains.
+    matchpath_rng = random.Random(shard_seed + 2_000_000)
 
     generate_facts = icd10cm_codes is not None and hcpcs_codes is not None and ndc_codes is not None
+    generate_matchpath = loinc_codes is not None
 
     vendor_rows: dict[str, list[dict]] = {v: [] for v in VENDORS}
     ground_truth_rows: list[dict] = []
@@ -189,14 +215,85 @@ def generate_shard(
                             }
                         )
 
+        # Match-path (Phase 20): independent of the member-domain appearances above -- a
+        # PBM or lab relationship doesn't depend on which of VENDOR_A/B/C this identity
+        # happened to enroll under. Ground truth for these goes to its own table
+        # (matchpath_ground_truth), never merged into the core ground_truth_rows above --
+        # mixing them in would introduce "true pairs" between core member records and
+        # match-path records that mdm.evaluate's existing blocking/scoring evaluation was
+        # never designed to find (they're never candidates against each other in
+        # matching.candidate_pairs), silently dragging down already-verified Phase 0-15
+        # recall/precision numbers the same way the Phase 19 shared-rng bug silently
+        # changed member-domain output -- a mistake worth not repeating.
+        if generate_matchpath:
+            if matchpath_rng.random() < PHARMACY_INFO_APPEARANCE_PROB:
+                record, noise_type = generate_pharmacy_info_appearance(
+                    matchpath_rng, matchpath_faker, identity, identity_index, nickname_table
+                )
+                fact_rows["pharmacy_info"].append(record)
+                fact_rows["matchpath_ground_truth"].append(
+                    {
+                        "record_key": f"VENDOR_B_PHARMACY:{record['source_record_id']}",
+                        "true_identity_id": identity.identity_id,
+                        "noise_type": noise_type,
+                    }
+                )
+            if matchpath_rng.random() < LAB_APPEARANCE_PROB:
+                record, noise_type = generate_lab_identity_appearance(
+                    matchpath_rng, matchpath_faker, identity, identity_index, nickname_table
+                )
+                fact_rows["lab_identity"].append(record)
+                fact_rows["matchpath_ground_truth"].append(
+                    {
+                        "record_key": f"VENDOR_D:{record['source_record_id']}",
+                        "true_identity_id": identity.identity_id,
+                        "noise_type": noise_type,
+                    }
+                )
+                fact_rows["lab_results"].extend(
+                    generate_lab_results(
+                        matchpath_rng,
+                        source_record_id=record["source_record_id"],
+                        loinc_codes=loinc_codes,
+                    )
+                )
+
     return vendor_rows, ground_truth_rows, fact_rows
 
 
 def generate_shard_task(
-    args: tuple[int, int, int, int, dict[str, list[str]], list[str] | None, list[str] | None, list[str] | None],
+    args: tuple[
+        int,
+        int,
+        int,
+        int,
+        dict[str, list[str]],
+        list[str] | None,
+        list[str] | None,
+        list[str] | None,
+        list[str] | None,
+    ],
 ) -> tuple[dict[str, list[dict]], list[dict], dict]:
     """multiprocessing-friendly single-argument wrapper around generate_shard."""
-    shard_index, id_start, id_end, seed_base, nickname_table, icd10cm_codes, hcpcs_codes, ndc_codes = args
+    (
+        shard_index,
+        id_start,
+        id_end,
+        seed_base,
+        nickname_table,
+        icd10cm_codes,
+        hcpcs_codes,
+        ndc_codes,
+        loinc_codes,
+    ) = args
     return generate_shard(
-        shard_index, id_start, id_end, seed_base, nickname_table, icd10cm_codes, hcpcs_codes, ndc_codes
+        shard_index,
+        id_start,
+        id_end,
+        seed_base,
+        nickname_table,
+        icd10cm_codes,
+        hcpcs_codes,
+        ndc_codes,
+        loinc_codes,
     )

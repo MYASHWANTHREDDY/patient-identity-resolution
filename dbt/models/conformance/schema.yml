@@ -86,3 +86,70 @@ models:
         tests:
           - unique
           - not_null
+
+  - name: pharmacy_info_normalized
+    description: >
+      Layer 2, match-path (Phase 20). Shaped like patient_normalized -- ssn is a typed
+      NULL, never populated for this domain -- so scripts/run_matchpath_matching.py can
+      block/score it against patient_normalized with the unchanged pipeline.
+    columns:
+      - name: record_key
+        tests:
+          - unique
+          - not_null
+      - name: source_record_id
+        tests:
+          - not_null
+      - name: first_name
+        tests:
+          - not_null
+      - name: last_name
+        tests:
+          - not_null
+      - name: gender
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["M", "F", "U"]
+
+  - name: lab_identity_normalized
+    description: >
+      Layer 2, match-path (Phase 20). VENDOR_D, no eligibility relationship to key off of
+      at all -- shaped like pharmacy_info_normalized for the same reason.
+    columns:
+      - name: record_key
+        tests:
+          - unique
+          - not_null
+      - name: source_record_id
+        tests:
+          - not_null
+      - name: first_name
+        tests:
+          - not_null
+      - name: last_name
+        tests:
+          - not_null
+      - name: gender
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["M", "F", "U"]
+
+  - name: lab_results_normalized
+    description: >
+      Layer 2, fact grain (Phase 20). One row per test result, never deduplicated --
+      lab_result_key is a row_number surrogate, not a stable cross-run identifier.
+    columns:
+      - name: lab_result_key
+        tests:
+          - unique
+          - not_null
+      - name: source_record_id
+        tests:
+          - not_null
+      - name: abnormal_flag
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["normal", "high", "low", "critical"]

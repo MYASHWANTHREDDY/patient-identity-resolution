@@ -22,3 +22,9 @@ sources:
       - name: vendor_c_medical_history
       - name: vendor_c_pharmacy_claims
       - name: vendor_id_map
+      # Phase 20 match-path domains (docs/domain-linking-strategy.md's match-path cells):
+      # exactly one source vendor each, so no vendor prefix in the table name (unlike the
+      # Phase 19 fact domains above).
+      - name: pharmacy_info
+      - name: lab_identity
+      - name: lab_results

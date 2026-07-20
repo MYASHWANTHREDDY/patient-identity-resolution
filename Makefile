@@ -1,4 +1,4 @@
-.PHONY: install install-dev lint format test data data-dev data-ci dbt-build-pre dbt-build evaluate estimate-params match quality-checks pipeline dashboard demo tf-plan tf-apply tf-destroy upload-gcs load-bigquery dbt-build-prod verify-parity package-spark upload-spark-deps dataproc-score-pairs dataproc-cluster-identities match-bigquery quality-checks-bigquery airflow-up airflow-down airflow-logs airflow-trigger-ingestion airflow-trigger-conformance airflow-trigger-dedup
+.PHONY: install install-dev lint format test data data-dev data-ci dbt-build-pre dbt-build evaluate estimate-params match match-path quality-checks pipeline dashboard demo tf-plan tf-apply tf-destroy upload-gcs load-bigquery dbt-build-prod verify-parity package-spark upload-spark-deps dataproc-score-pairs dataproc-cluster-identities match-bigquery quality-checks-bigquery airflow-up airflow-down airflow-logs airflow-trigger-ingestion airflow-trigger-conformance airflow-trigger-dedup
 
 TIER ?= dev
 SEED ?= 42
@@ -49,11 +49,18 @@ estimate-params:
 match:
 	python scripts/run_matching.py --tier $(TIER)
 
+# Phase 20: resolves pharmacy_info/lab_identity (no shared ID with anything) against the
+# core population run_matching just built -- must run after match, before dbt-build, since
+# serving.fct_pharmacy_info/fct_lab_results depend on serving.matchpath_resolution existing
+# (docs/domain-linking-strategy.md).
+match-path:
+	python scripts/run_matchpath_matching.py --tier $(TIER)
+
 quality-checks:
 	python scripts/run_quality_checks.py --tier $(TIER)
 
 # The full local pipeline, in order. Each step depends on the previous one's output.
-pipeline: data dbt-build-pre estimate-params match dbt-build evaluate quality-checks
+pipeline: data dbt-build-pre estimate-params match match-path dbt-build evaluate quality-checks
 
 dashboard:
 	streamlit run dashboard/app.py -- --tier $(TIER)

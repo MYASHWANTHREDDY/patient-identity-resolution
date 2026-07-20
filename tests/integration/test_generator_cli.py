@@ -45,6 +45,13 @@ FACT_DIR_SORT_KEYS = {
     "vendor_id_map": "pbm_member_id",
 }
 
+# Phase 20 match-path raw directories -- each has exactly one source, so (unlike
+# FACT_DIR_SORT_KEYS) there's no vendor prefix in the directory name.
+MATCHPATH_DIR_SORT_KEYS = {
+    "pharmacy_info": "source_record_id",
+    "lab_identity": "source_record_id",
+}
+
 
 def _read_tier_dataset(tier_dir: Path) -> dict:
     """Member domain only (vendor_a/b/c) -- all share the "record_id" sort key this
@@ -74,6 +81,29 @@ def _read_fact_dataset(tier_dir: Path) -> dict:
             rows.extend(pq.read_table(part).to_pylist())
         rows.sort(key=lambda r: r[sort_key])
         dataset[dir_name] = rows
+    return dataset
+
+
+def _read_matchpath_dataset(tier_dir: Path) -> dict:
+    dataset = {}
+    for dir_name, sort_key in MATCHPATH_DIR_SORT_KEYS.items():
+        rows = []
+        for part in sorted((tier_dir / "raw" / dir_name).glob("part-*.parquet")):
+            rows.extend(pq.read_table(part).to_pylist())
+        rows.sort(key=lambda r: r[sort_key])
+        dataset[dir_name] = rows
+
+    lab_results = []
+    for part in sorted((tier_dir / "raw" / "lab_results").glob("part-*.parquet")):
+        lab_results.extend(pq.read_table(part).to_pylist())
+    lab_results.sort(key=lambda r: (r["source_record_id"], r["test_date"], r["test_code"]))
+    dataset["lab_results"] = lab_results
+
+    gt_rows = []
+    for part in sorted((tier_dir / "matchpath_ground_truth").glob("part-*.parquet")):
+        gt_rows.extend(pq.read_table(part).to_pylist())
+    gt_rows.sort(key=lambda r: r["record_key"])
+    dataset["matchpath_ground_truth"] = gt_rows
     return dataset
 
 
@@ -179,3 +209,86 @@ def test_generator_fact_domains_reference_real_codes(tmp_path):
     # at the dbt level; this is the same invariant, checked at the generator level).
     mapped_ids = {row["pbm_member_id"] for row in facts["vendor_id_map"]}
     assert all(row["pbm_member_id"] in mapped_ids for row in rx_rows)
+
+
+def test_generator_matchpath_domains_identical_regardless_of_worker_count(tmp_path):
+    """Phase 20: pharmacy_info/lab_identity/lab_results/matchpath_ground_truth use their
+    own independently-seeded rng (matchpath_rng) and Faker instance (matchpath_faker) --
+    reproducibility/worker-independence must hold the same way it does for the member
+    domain and Phase 19's fact domains."""
+    out_single = tmp_path / "single"
+    out_multi = tmp_path / "multi"
+
+    _run_generate(out_single, workers=1)
+    _run_generate(out_multi, workers=3)
+
+    matchpath_single = _read_matchpath_dataset(out_single / "ci")
+    matchpath_multi = _read_matchpath_dataset(out_multi / "ci")
+
+    assert matchpath_single == matchpath_multi
+    assert sum(len(rows) for rows in matchpath_single.values()) > 0
+
+
+def test_generator_matchpath_generation_does_not_perturb_member_or_fact_domains(tmp_path):
+    """Regression guard: match-path generation originally shared the member domain's Faker
+    instance (faker.address()/faker.phone_number() inside matchpath.py), which silently
+    shifted Faker's internal state and changed member-domain/Phase-19 output the moment
+    match-path generation ran -- the same class of bug as Phase 19's shared-rng bug, just
+    via Faker instead of random.Random. --no-facts skips match-path generation entirely
+    (loinc_codes stays None), so comparing a --no-facts run against a full run isolates
+    exactly this: member-domain and Phase 19 fact-domain output must be identical either
+    way."""
+    out_no_facts = tmp_path / "no_facts"
+    out_full = tmp_path / "full"
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(GENERATE_SCRIPT),
+            "--tier",
+            "ci",
+            "--seed",
+            "42",
+            "--workers",
+            "1",
+            "--shard-size",
+            "400",
+            "--out-dir",
+            str(out_no_facts),
+            "--no-facts",
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+    )
+    _run_generate(out_full, workers=1)
+
+    dataset_no_facts = _read_tier_dataset(out_no_facts / "ci")
+    dataset_full = _read_tier_dataset(out_full / "ci")
+    assert dataset_no_facts == dataset_full
+
+
+def test_generator_matchpath_references_real_loinc_codes(tmp_path):
+    """Every lab test code must come from the real LOINC table fetched in Phase 18 --
+    never invented (P3)."""
+    from mdm.reference_codes import load_loinc
+
+    out_dir = tmp_path / "out"
+    _run_generate(out_dir, workers=2)
+    matchpath = _read_matchpath_dataset(out_dir / "ci")
+
+    loinc_codes = set(load_loinc())
+    assert matchpath["lab_results"]
+    assert all(row["test_code"] in loinc_codes for row in matchpath["lab_results"])
+
+    # lab_results rows must reference a real lab_identity source_record_id -- otherwise
+    # they're orphaned test details with no identity to resolve against.
+    lab_identity_ids = {row["source_record_id"] for row in matchpath["lab_identity"]}
+    assert all(row["source_record_id"] in lab_identity_ids for row in matchpath["lab_results"])
+
+    # matchpath_ground_truth must stay fully disjoint from the core ground_truth table --
+    # mixing them would introduce spurious "true pairs" between core and match-path
+    # records that would corrupt already-verified Phase 0-15 evaluation metrics.
+    core = _read_tier_dataset(out_dir / "ci")
+    core_keys = {row["record_key"] for row in core["ground_truth"]}
+    matchpath_keys = {row["record_key"] for row in matchpath["matchpath_ground_truth"]}
+    assert core_keys.isdisjoint(matchpath_keys)

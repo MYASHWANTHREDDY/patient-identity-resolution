@@ -213,6 +213,90 @@ def run_fact_table_evaluation(tier: str, db_path: Path) -> dict | None:
         con.close()
 
 
+_MATCHPATH_DOMAIN_PREFIX = {"pharmacy_info": "VENDOR_B_PHARMACY", "lab_identity": "VENDOR_D"}
+
+
+def run_matchpath_evaluation(tier: str, db_path: Path) -> dict | None:
+    """Precision/recall for Phase 20's match-path resolution (pharmacy_info, lab_identity)
+    against matchpath_ground_truth -- deliberately a separate function from
+    run_baseline_evaluation/run_scoring_evaluation above, never sharing their true_pairs set,
+    since matchpath_ground_truth must stay isolated from the core ground_truth table
+    (PROJECT_CONSTITUTION.md Phase 20: mixing them would introduce spurious "true pairs"
+    between core and match-path records that would corrupt the already-verified Phase 0-15
+    numbers those functions report). Returns None if scripts/run_matchpath_matching.py
+    hasn't run yet, the same "optional section" pattern run_fact_table_evaluation uses."""
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        tables = {
+            row[0]
+            for row in con.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'serving'"
+            ).fetchall()
+        }
+        if "matchpath_resolution" not in tables:
+            return None
+
+        mp_gt = con.execute(
+            "SELECT record_key, true_identity_id FROM ground_truth.matchpath_ground_truth"
+        ).df()
+        core_gt = dict(
+            con.execute(
+                "SELECT record_key, true_identity_id FROM ground_truth.ground_truth"
+            ).fetchall()
+        )
+        resolution = con.execute(
+            "SELECT domain, record_key, matched_core_record_key FROM serving.matchpath_resolution"
+        ).df()
+        review_count = con.execute("SELECT count(*) FROM serving.matchpath_review_queue").fetchone()[
+            0
+        ]
+    finally:
+        con.close()
+
+    mp_key_to_identity = dict(zip(mp_gt["record_key"], mp_gt["true_identity_id"], strict=False))
+
+    by_domain: dict[str, dict] = {}
+    overall_tp = overall_fp = 0
+    for domain, group in resolution.groupby("domain"):
+        tp = fp = 0
+        for row in group.itertuples():
+            true_identity = mp_key_to_identity[row.record_key]
+            matched_identity = core_gt.get(row.matched_core_record_key)
+            if matched_identity == true_identity:
+                tp += 1
+            else:
+                fp += 1
+        prefix = f"{_MATCHPATH_DOMAIN_PREFIX[domain]}:"
+        total_domain_records = int(mp_gt["record_key"].str.startswith(prefix).sum())
+        recall = tp / total_domain_records if total_domain_records else 0.0
+        precision = tp / (tp + fp) if (tp + fp) else 0.0
+        by_domain[domain] = {
+            "total_records": total_domain_records,
+            "auto_matched": len(group),
+            "true_positives": tp,
+            "false_positives": fp,
+            "precision": precision,
+            "recall": recall,
+        }
+        overall_tp += tp
+        overall_fp += fp
+
+    total_records = len(mp_gt)
+    overall_recall = overall_tp / total_records if total_records else 0.0
+    overall_precision = overall_tp / (overall_tp + overall_fp) if (overall_tp + overall_fp) else 0.0
+
+    return {
+        "tier": tier,
+        "total_records": total_records,
+        "num_auto_matched": len(resolution),
+        "num_review": review_count,
+        "num_unmatched": total_records - len(resolution) - review_count,
+        "precision": overall_precision,
+        "recall": overall_recall,
+        "by_domain": by_domain,
+    }
+
+
 def load_records_by_key(db_path: Path) -> dict[str, dict]:
     con = duckdb.connect(str(db_path), read_only=True)
     try:
@@ -320,6 +404,7 @@ def render_results_md(
     blocking_result: dict | None = None,
     scoring_result: dict | None = None,
     fact_table_result: dict | None = None,
+    matchpath_result: dict | None = None,
 ) -> str:
     m = result["metrics"]
     lines = [
@@ -434,6 +519,38 @@ def render_results_md(
             )
         lines.append("")
 
+    if matchpath_result is not None:
+        lines += [
+            f"## Match-path resolution ({matchpath_result['tier']} tier, Phase 20)",
+            "",
+            "pharmacy_info/lab_identity have no shared ID with anything -- real matching",
+            "against conformance.patient_normalized, not a join. Precision/recall are",
+            "measured against matchpath_ground_truth, a table kept fully separate from the",
+            "core ground_truth table so these numbers never mix into the Phase 0-15 figures",
+            "above (PROJECT_CONSTITUTION.md Phase 20).",
+            "",
+            f"- Match-path records: {matchpath_result['total_records']}",
+            f"- Auto-matched: {matchpath_result['num_auto_matched']}",
+            f"- Review queue: {matchpath_result['num_review']}",
+            f"- Unmatched: {matchpath_result['num_unmatched']}",
+            "",
+            "| Metric | Value |",
+            "|---|---|",
+            f"| Precision | {matchpath_result['precision']:.4f} |",
+            f"| Recall | {matchpath_result['recall']:.4f} |",
+            "",
+            "### By domain",
+            "",
+            "| Domain | Records | Auto-matched | Precision | Recall |",
+            "|---|---|---|---|---|",
+        ]
+        for domain, stats in matchpath_result["by_domain"].items():
+            lines.append(
+                f"| {domain} | {stats['total_records']} | {stats['auto_matched']} | "
+                f"{stats['precision']:.4f} | {stats['recall']:.4f} |"
+            )
+        lines.append("")
+
     return "\n".join(lines)
 
 
@@ -479,10 +596,13 @@ def main(argv: list[str] | None = None) -> dict:
         )
 
     fact_table_result = run_fact_table_evaluation(args.tier, db_path)
+    matchpath_result = run_matchpath_evaluation(args.tier, db_path)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(
-        render_results_md(result, blocking_result, scoring_result, fact_table_result),
+        render_results_md(
+            result, blocking_result, scoring_result, fact_table_result, matchpath_result
+        ),
         encoding="utf-8",
     )
 
@@ -509,6 +629,12 @@ def main(argv: list[str] | None = None) -> dict:
             for domain, counts in fact_table_result["counts"].items()
         )
         print(f"fact_tables: {fact_summary}")
+    if matchpath_result:
+        print(
+            f"matchpath: precision={matchpath_result['precision']:.4f} "
+            f"recall={matchpath_result['recall']:.4f} "
+            f"auto_matched={matchpath_result['num_auto_matched']}/{matchpath_result['total_records']}"
+        )
     return result
 
 
