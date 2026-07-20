@@ -21,7 +21,20 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from mdm.api import DOMAIN_TABLES  # noqa: E402
 from mdm.config import VALID_TIERS, load_config  # noqa: E402
+
+# Display label per domain (Phase 23, PROJECT_CONSTITUTION.md) -- DOMAIN_TABLES itself (Phase
+# 22's src/mdm/api.py) is the single source of truth for domain -> serving.fct_* table name,
+# reused here rather than re-declared, so the dashboard and the API can never drift apart on
+# what a "domain" is.
+_DOMAIN_LABELS = {
+    "medical_history": "Medical history",
+    "medical_claims": "Medical claims",
+    "pharmacy_claims": "Pharmacy claims",
+    "pharmacy_info": "Pharmacy info",
+    "lab_results": "Lab results",
+}
 
 st.set_page_config(page_title="patient-dedup-system", layout="wide")
 
@@ -223,27 +236,89 @@ def _render_golden_records(db_path: str) -> None:
         st.info("No serving.member_360 yet -- run `make pipeline` to completion.")
         return
 
-    search = st.text_input("Search by last name")
-    if search:
-        query = (
-            "SELECT * FROM serving.member_360 WHERE upper(last_name) LIKE upper(?) "
-            "ORDER BY source_record_count DESC LIMIT 200"
+    # Search-and-select stays exactly what it already was (Phase 9); the only new entry
+    # point is a direct patient_global_id lookup, for a caller arriving with an ID already
+    # in hand (e.g. from Phase 22's API) rather than a name (PROJECT_CONSTITUTION.md Phase
+    # 23).
+    pgid_search = st.text_input(
+        "Jump to a patient_global_id",
+        help="A caller arriving from the Member 360 API already has this ID.",
+    )
+    if pgid_search.strip():
+        member_df = _query(
+            db_path,
+            "SELECT * FROM serving.member_360 WHERE patient_global_id = ?",
+            [pgid_search.strip()],
         )
-        member_df = _query(db_path, query, [f"%{search}%"])
     else:
-        query = "SELECT * FROM serving.member_360 ORDER BY source_record_count DESC LIMIT 200"
-        member_df = _query(db_path, query)
+        search = st.text_input("Search by last name")
+        if search:
+            query = (
+                "SELECT * FROM serving.member_360 WHERE upper(last_name) LIKE upper(?) "
+                "ORDER BY source_record_count DESC LIMIT 200"
+            )
+            member_df = _query(db_path, query, [f"%{search}%"])
+        else:
+            query = "SELECT * FROM serving.member_360 ORDER BY source_record_count DESC LIMIT 200"
+            member_df = _query(db_path, query)
     st.dataframe(member_df, width='stretch')
 
-    if not member_df.empty:
-        selected_pgid = st.selectbox("Inspect field lineage for", member_df["patient_global_id"])
-        lineage_df = _query(
-            db_path,
-            "SELECT field_name, winning_value, source_vendor, source_record_id, rule_applied "
-            "FROM serving.field_lineage WHERE patient_global_id = ?",
-            [selected_pgid],
-        )
+    if member_df.empty:
+        if pgid_search.strip():
+            st.warning(f"No member found for patient_global_id '{pgid_search.strip()}'.")
+        return
+
+    selected_pgid = st.selectbox("Inspect", member_df["patient_global_id"])
+    _render_member_detail(db_path, selected_pgid)
+
+
+def _render_member_detail(db_path: str, patient_global_id: str) -> None:
+    """One section per domain -- eligibility, field lineage, then every fact/match-path
+    domain from Phases 19-20 -- each gracefully empty (not an error) rather than skipped,
+    so a member with data in only one or two domains still shows the full shape of what
+    *could* be known about them (PROJECT_CONSTITUTION.md Phase 23)."""
+    st.subheader("Eligibility")
+    eligibility_df = _query(
+        db_path,
+        "SELECT a.source_vendor, a.source_record_id, p.first_name, p.last_name, p.dob, "
+        "p.gender, p.ssn FROM serving.member_alternate_identifier a "
+        "LEFT JOIN conformance.patient_normalized p "
+        "ON p.source_vendor = a.source_vendor AND p.source_record_id = a.source_record_id "
+        "WHERE a.patient_global_id = ? ORDER BY a.source_vendor",
+        [patient_global_id],
+    )
+    if eligibility_df.empty:
+        st.caption("No eligibility records for this person.")
+    else:
+        st.dataframe(eligibility_df, width='stretch')
+
+    st.subheader("Field lineage")
+    lineage_df = _query(
+        db_path,
+        "SELECT field_name, winning_value, source_vendor, source_record_id, rule_applied "
+        "FROM serving.field_lineage WHERE patient_global_id = ?",
+        [patient_global_id],
+    )
+    if lineage_df.empty:
+        st.caption("No field lineage for this person.")
+    else:
         st.dataframe(lineage_df, width='stretch')
+
+    for domain, table in DOMAIN_TABLES.items():
+        st.subheader(_DOMAIN_LABELS[domain])
+        if not _table_exists(db_path, "serving", table):
+            st.caption(f"serving.{table} not built yet -- run `make pipeline` to completion.")
+            continue
+        # table comes from DOMAIN_TABLES, a fixed internal dict, never user input.
+        domain_df = _query(
+            db_path,
+            f"SELECT * FROM serving.{table} WHERE patient_global_id = ?",
+            [patient_global_id],
+        )
+        if domain_df.empty:
+            st.caption("No records in this domain.")
+        else:
+            st.dataframe(domain_df, width='stretch')
 
 
 def _render_methodology() -> None:
