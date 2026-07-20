@@ -112,9 +112,7 @@ def test_run_matchpath_matching_resolves_against_ground_truth(tmp_path):
         "SELECT record_key, true_identity_id FROM ground_truth.matchpath_ground_truth"
     ).df()
     core_gt = dict(
-        con.execute(
-            "SELECT record_key, true_identity_id FROM ground_truth.ground_truth"
-        ).fetchall()
+        con.execute("SELECT record_key, true_identity_id FROM ground_truth.ground_truth").fetchall()
     )
     resolution = con.execute(
         "SELECT record_key, matched_core_record_key FROM serving.matchpath_resolution"
@@ -173,9 +171,7 @@ def test_run_matchpath_matching_fct_tables_stay_within_conformance_bounds(tmp_pa
     db_path = _build_ci_tier_db_with_matchpath_resolution(tmp_path)
 
     con = duckdb.connect(str(db_path), read_only=True)
-    fct_pharmacy_count = con.execute("SELECT count(*) FROM serving.fct_pharmacy_info").fetchone()[
-        0
-    ]
+    fct_pharmacy_count = con.execute("SELECT count(*) FROM serving.fct_pharmacy_info").fetchone()[0]
     fct_lab_count = con.execute("SELECT count(*) FROM serving.fct_lab_results").fetchone()[0]
     pharmacy_conformance_count = con.execute(
         "SELECT count(*) FROM conformance.pharmacy_info_normalized"

@@ -2,3 +2,6 @@
 
 ruff==0.8.4
 pytest==8.3.4
+
+# Phase 22: FastAPI's TestClient requires httpx.
+httpx==0.28.1

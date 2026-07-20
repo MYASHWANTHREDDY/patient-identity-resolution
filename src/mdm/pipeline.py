@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import pandas as pd
 
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
     import duckdb
 
 from mdm.clustering import build_clusters, finalize_cluster_membership
-from mdm.crosswalk import CrosswalkEntry, resolve_crosswalk
+from mdm.crosswalk import CrosswalkEntry, mint_id, resolve_crosswalk
 from mdm.scoring import compare_record_pair, score_fs
 from mdm.survivorship import FIELDS as SURVIVORSHIP_FIELDS
 from mdm.survivorship import build_golden_record
@@ -390,7 +391,8 @@ def _write_matchpath_tables(con, resolution_rows: list[dict], review_rows: list[
     )
     con.register("matchpath_resolution_df", resolution_df)
     con.execute(
-        "CREATE OR REPLACE TABLE serving.matchpath_resolution AS SELECT * FROM matchpath_resolution_df"
+        "CREATE OR REPLACE TABLE serving.matchpath_resolution AS "
+        "SELECT * FROM matchpath_resolution_df"
     )
 
     review_columns = ["domain", "record_key", "candidate_core_record_key", "score", "status"]
@@ -401,8 +403,226 @@ def _write_matchpath_tables(con, resolution_rows: list[dict], review_rows: list[
     )
     con.register("matchpath_review_df", review_df)
     con.execute(
-        "CREATE OR REPLACE TABLE serving.matchpath_review_queue AS SELECT * FROM matchpath_review_df"
+        "CREATE OR REPLACE TABLE serving.matchpath_review_queue AS "
+        "SELECT * FROM matchpath_review_df"
     )
+
+
+# Phase 22 (Member 360 API): a hand-rolled DuckDB expression identical to
+# dbt/macros/phonetic_key.sql's DuckDB branch -- computing a phonetic key for a single ad-hoc
+# input record (not yet a table row) is exactly the kind of one-off, non-batch SQL the Phase
+# 20 design decision already accepted doing directly in Python rather than through dbt (see
+# _MATCHPATH_BLOCKING_PASSES above). Only the DuckDB branch is needed: this API only ever
+# runs against the local ci/dev tier backend, never BigQuery.
+def _phonetic_key_expr(col: str) -> str:
+    cleaned = f"regexp_replace(upper({col}), '[^A-Z]', '', 'g')"
+    coded = f"translate({cleaned}, 'AEIOUHWYBFPVCGJKQSXZDTLMNR', '00000000111122222222334556')"
+    expr = coded
+    for _pass in range(3):
+        for digit in "0123456":
+            expr = f"replace({expr}, '{digit}{digit}', '{digit}')"
+    digits_only = f"replace(substr({expr}, 2), '0', '')"
+    return (
+        f"case when {cleaned} is null or {cleaned} = '' then null "
+        f"else substr({cleaned}, 1, 1) || rpad(substr({digits_only}, 1, 3), 3, '0') end"
+    )
+
+
+def compute_phonetic_key(con, value: str | None) -> str | None:
+    if not value:
+        return None
+    row = con.execute(
+        f"SELECT {_phonetic_key_expr('val')} FROM (SELECT ? AS val) t", [value]
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _normalize_input_record(record: dict) -> dict:
+    """Mirrors dbt/models/staging/stg_vendor_*.sql's Layer 1 -> Layer 2 normalization
+    (uppercase/trim names, collapse gender to M/F/U, digits-only ssn) for a record that
+    never passed through a staging model -- it arrived directly via the API, not a vendor
+    feed."""
+    first_name = (record.get("first_name") or "").strip().upper() or None
+    last_name = (record.get("last_name") or "").strip().upper() or None
+    gender_raw = (record.get("gender") or "").strip().upper()
+    gender = gender_raw if gender_raw in ("M", "F") else "U"
+    ssn_raw = record.get("ssn")
+    ssn = re.sub(r"\D", "", ssn_raw) if ssn_raw else None
+    return {
+        "first_name": first_name,
+        "last_name": last_name,
+        "dob": record.get("dob"),
+        "gender": gender,
+        "ssn": ssn or None,
+    }
+
+
+def _find_candidate_records(con, normalized: dict) -> list[dict]:
+    """The same four blocking passes as dbt/models/blocking/block_keys.sql
+    (config/matching.yml's blocking.passes), run directly against
+    conformance.patient_normalized for one ad-hoc record instead of a self-join -- an
+    asymmetric lookup, same idea as Phase 20's asymmetric_candidate_pairs, just for a single
+    record instead of a batch of match-path domains."""
+    first_name_phonetic = compute_phonetic_key(con, normalized["first_name"])
+    last_name_phonetic = compute_phonetic_key(con, normalized["last_name"])
+    dob_year = normalized["dob"].year if normalized["dob"] else None
+
+    cursor = con.execute(
+        "SELECT record_key, first_name, last_name, dob, gender, ssn "
+        "FROM conformance.patient_normalized "
+        "WHERE (? IS NOT NULL AND ssn IS NOT NULL AND ssn = ?) "
+        "OR (dob is not null AND dob = ? AND last_name_phonetic = ?) "
+        "OR (dob_year = ? AND first_name_phonetic = ? AND last_name_phonetic = ?) "
+        "OR (last_name_phonetic = ? AND gender = ? AND dob_year = ?)",
+        [
+            normalized["ssn"],
+            normalized["ssn"],
+            normalized["dob"],
+            last_name_phonetic,
+            dob_year,
+            first_name_phonetic,
+            last_name_phonetic,
+            last_name_phonetic,
+            normalized["gender"],
+            dob_year,
+        ],
+    )
+    columns = [d[0] for d in cursor.description]
+    return [dict(zip(columns, row, strict=False)) for row in cursor.fetchall()]
+
+
+def resolve_new_record(
+    db_path: str,
+    record: dict,
+    *,
+    run_id: str | None = None,
+    fs_params: dict | None = None,
+    nickname_index: dict[str, str] | None = None,
+) -> dict:
+    """Phase 22: the API's write path. `record` needs first_name/last_name/dob/gender, ssn
+    optional -- blocked and scored against conformance.patient_normalized with the same
+    comparator/Fellegi-Sunter/triage pipeline every other matching path in this project
+    reuses. An AUTO_MATCH resolves to that existing person's patient_global_id via
+    serving.crosswalk; anything less confident (REVIEW or no candidates at all) mints a
+    brand-new identity -- the same conservative default finalize_cluster_membership gives
+    every record untouched by an auto-match edge in the batch pipeline (never merge without
+    confidence).
+
+    Writes only to the serving layer (crosswalk, member_demographics, membership,
+    member_alternate_identifier) -- this is a speed-layer overlay on top of the
+    batch-computed golden population, not a write into raw_standard/conformance. A genuinely
+    new person created here is visible immediately (member_360 is a live view), but is only
+    as durable as the *next* full run_matching(): that function rebuilds serving.crosswalk
+    from conformance.patient_normalized's record_keys only, so an API-minted
+    record_key (which was never added to a vendor feed) has no representation there and
+    won't be carried forward. A real system would feed the record back through the batch
+    layer to make it permanent; this API is the resolve/read layer, not the ingestion path.
+    """
+    import duckdb
+
+    run_id = run_id or datetime.now(UTC).isoformat()
+    fs_params = fs_params if fs_params is not None else load_fs_params()
+    nickname_index = nickname_index if nickname_index is not None else load_nickname_index()
+    thresholds = load_thresholds()
+
+    normalized = _normalize_input_record(record)
+
+    con = duckdb.connect(db_path)
+    try:
+        crosswalk_rows = con.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'serving' AND table_name = 'crosswalk'"
+        ).fetchall()
+        if not crosswalk_rows:
+            raise RuntimeError(
+                "serving.crosswalk does not exist -- run scripts/run_matching.py before "
+                "resolving records through the API."
+            )
+
+        candidates = _find_candidate_records(con, normalized)
+        best_score: float | None = None
+        best_record_key: str | None = None
+        for candidate in candidates:
+            agreement = compare_record_pair(normalized, candidate, nickname_index=nickname_index)
+            score = score_fs(agreement, fs_params)
+            if best_score is None or score > best_score:
+                best_score, best_record_key = score, candidate["record_key"]
+
+        decision = (
+            decide(best_score, upper=thresholds["upper"], lower=thresholds["lower"])
+            if best_score is not None
+            else None
+        )
+
+        if decision == AUTO_MATCH:
+            pgid_row = con.execute(
+                "SELECT patient_global_id FROM serving.crosswalk WHERE record_key = ?",
+                [best_record_key],
+            ).fetchone()
+            if pgid_row is None:
+                raise RuntimeError(
+                    f"matched core record {best_record_key} has no crosswalk entry -- "
+                    "run scripts/run_matching.py first"
+                )
+            return {
+                "patient_global_id": pgid_row[0],
+                "status": "matched",
+                "score": best_score,
+                "matched_record_key": best_record_key,
+            }
+
+        existing_ids = con.execute("SELECT patient_global_id FROM serving.crosswalk").fetchall()
+        next_sequence = next_crosswalk_sequence(
+            {
+                f"seed{i}": CrosswalkEntry(f"seed{i}", pgid, run_id, run_id)
+                for i, (pgid,) in enumerate(existing_ids)
+            }
+        )
+        pgid = mint_id(next_sequence)
+        source_record_id = uuid4().hex
+        # "API:{uuid}", the same {vendor}:{source_record_id} shape every other record_key in
+        # this project uses (e.g. "VENDOR_A:00000000") -- built from source_record_id below,
+        # not duplicated into it, so member_360's alternate_identifiers array (which
+        # reconstructs source_vendor || ':' || source_record_id) doesn't show "API:API:...".
+        record_key = f"API:{source_record_id}"
+        ssn_last4 = normalized["ssn"][-4:] if normalized["ssn"] else None
+
+        con.execute(
+            "INSERT INTO serving.crosswalk (record_key, patient_global_id, first_seen_run, "
+            "last_seen_run) VALUES (?, ?, ?, ?)",
+            [record_key, pgid, run_id, run_id],
+        )
+        con.execute(
+            "INSERT INTO serving.member_demographics (patient_global_id, first_name, "
+            "last_name, dob, gender, ssn_last4) VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                pgid,
+                normalized["first_name"],
+                normalized["last_name"],
+                normalized["dob"],
+                normalized["gender"],
+                ssn_last4,
+            ],
+        )
+        con.execute(
+            "INSERT INTO serving.membership (patient_global_id, source_record_count) "
+            "VALUES (?, ?)",
+            [pgid, 1],
+        )
+        con.execute(
+            "INSERT INTO serving.member_alternate_identifier (patient_global_id, "
+            "source_vendor, source_record_id) VALUES (?, ?, ?)",
+            [pgid, "API", source_record_id],
+        )
+
+        return {
+            "patient_global_id": pgid,
+            "status": "created",
+            "score": best_score,
+            "matched_record_key": None,
+        }
+    finally:
+        con.close()
 
 
 def build_serving_tables(new_crosswalk, records_by_key, thresholds):

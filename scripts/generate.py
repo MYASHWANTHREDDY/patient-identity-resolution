@@ -166,9 +166,7 @@ def run(
         vid_dir = out_root / "raw" / "vendor_id_map"
         for shard_index, rows in enumerate(vendor_id_map_shards):
             write_parquet(vid_dir / f"part-{shard_index:05d}.parquet", rows, VENDOR_ID_MAP_SCHEMA)
-        fact_counts["vendor_id_map"] = {
-            "total": sum(len(r) for r in vendor_id_map_shards)
-        }
+        fact_counts["vendor_id_map"] = {"total": sum(len(r) for r in vendor_id_map_shards)}
 
         # Phase 20 match-path domains: pharmacy_info and lab_identity are raw source
         # records (no shared ID with anything -- real matching resolves them later),
@@ -189,9 +187,7 @@ def run(
             write_parquet(
                 matchpath_gt_dir / f"part-{shard_index:05d}.parquet", rows, GROUND_TRUTH_SCHEMA
             )
-        fact_counts["matchpath_ground_truth"] = {
-            "total": sum(len(r) for r in matchpath_gt_shards)
-        }
+        fact_counts["matchpath_ground_truth"] = {"total": sum(len(r) for r in matchpath_gt_shards)}
 
     record_counts = {vendor: sum(len(r) for r in rows) for vendor, rows in vendor_shards.items()}
     return {

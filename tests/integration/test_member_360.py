@@ -101,9 +101,9 @@ def test_member_360_covers_every_golden_record_including_zero_domain_rows(tmp_pa
     db_path = _build_fully_matched_ci_tier_db(tmp_path)
 
     con = duckdb.connect(str(db_path), read_only=True)
-    golden_record_count = con.execute("SELECT count(*) FROM serving.member_demographics").fetchone()[
-        0
-    ]
+    golden_record_count = con.execute(
+        "SELECT count(*) FROM serving.member_demographics"
+    ).fetchone()[0]
     member_360_count = con.execute("SELECT count(*) FROM serving.member_360").fetchone()[0]
     zero_domain_counts = con.execute(
         "SELECT count(*) FROM serving.member_360 WHERE encounter_count = 0 "
@@ -151,9 +151,9 @@ def test_member_360_domain_counts_match_fact_tables(tmp_path):
     plan_tier_count = con.execute(
         "SELECT count(*) FROM serving.member_360 WHERE pharmacy_plan_tier IS NOT NULL"
     ).fetchone()[0]
-    fct_pharmacy_info_count = con.execute("SELECT count(*) FROM serving.fct_pharmacy_info").fetchone()[
-        0
-    ]
+    fct_pharmacy_info_count = con.execute(
+        "SELECT count(*) FROM serving.fct_pharmacy_info"
+    ).fetchone()[0]
     assert plan_tier_count == fct_pharmacy_info_count
     con.close()
 

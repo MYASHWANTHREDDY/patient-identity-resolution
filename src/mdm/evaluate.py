@@ -247,9 +247,9 @@ def run_matchpath_evaluation(tier: str, db_path: Path) -> dict | None:
         resolution = con.execute(
             "SELECT domain, record_key, matched_core_record_key FROM serving.matchpath_resolution"
         ).df()
-        review_count = con.execute("SELECT count(*) FROM serving.matchpath_review_queue").fetchone()[
-            0
-        ]
+        review_count = con.execute(
+            "SELECT count(*) FROM serving.matchpath_review_queue"
+        ).fetchone()[0]
     finally:
         con.close()
 

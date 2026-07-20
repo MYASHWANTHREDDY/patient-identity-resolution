@@ -1,4 +1,4 @@
-.PHONY: install install-dev lint format test data data-dev data-ci dbt-build-pre dbt-build evaluate estimate-params match match-path quality-checks pipeline dashboard demo tf-plan tf-apply tf-destroy upload-gcs load-bigquery dbt-build-prod verify-parity package-spark upload-spark-deps dataproc-score-pairs dataproc-cluster-identities match-bigquery quality-checks-bigquery airflow-up airflow-down airflow-logs airflow-trigger-ingestion airflow-trigger-conformance airflow-trigger-dedup
+.PHONY: install install-dev lint format test data data-dev data-ci dbt-build-pre dbt-build evaluate estimate-params match match-path quality-checks pipeline dashboard api demo tf-plan tf-apply tf-destroy upload-gcs load-bigquery dbt-build-prod verify-parity package-spark upload-spark-deps dataproc-score-pairs dataproc-cluster-identities match-bigquery quality-checks-bigquery airflow-up airflow-down airflow-logs airflow-trigger-ingestion airflow-trigger-conformance airflow-trigger-dedup
 
 TIER ?= dev
 SEED ?= 42
@@ -64,6 +64,10 @@ pipeline: data dbt-build-pre estimate-params match match-path dbt-build evaluate
 
 dashboard:
 	streamlit run dashboard/app.py -- --tier $(TIER)
+
+# Phase 22: resolve-and-fetch service over the full data model.
+api:
+	python -m mdm.api --tier $(TIER)
 
 # Reviewer path (PROJECT_CONSTITUTION.md #4): dev-tier pipeline end to end, then the
 # dashboard. No GCP account needed.

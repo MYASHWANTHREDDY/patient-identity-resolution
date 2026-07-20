@@ -165,9 +165,9 @@ def generate_lab_results(
                 "test_code": rng.choice(loinc_codes),
                 "result_value": f"{rng.uniform(0.1, 500):.1f}",
                 "result_unit": rng.choice(("mg/dL", "mmol/L", "U/L", "%", "10^3/uL")),
-                "abnormal_flag": rng.choices(
-                    ABNORMAL_FLAGS, weights=(0.7, 0.15, 0.1, 0.05), k=1
-                )[0],
+                "abnormal_flag": rng.choices(ABNORMAL_FLAGS, weights=(0.7, 0.15, 0.1, 0.05), k=1)[
+                    0
+                ],
             }
         )
     return rows

@@ -26,9 +26,7 @@ MATCHPATH_TABLES = ("pharmacy_info", "lab_identity", "lab_results")
 
 def load_tier_to_duckdb(tier_dir: Path, db_path: Path) -> dict[str, int]:
     if not tier_dir.exists():
-        raise FileNotFoundError(
-            f"No generated data at {tier_dir} -- run scripts/generate.py first"
-        )
+        raise FileNotFoundError(f"No generated data at {tier_dir} -- run scripts/generate.py first")
 
     raw_dir = tier_dir / "raw"
     fact_tables = sorted(

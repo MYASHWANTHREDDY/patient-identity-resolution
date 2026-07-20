@@ -126,8 +126,9 @@ def test_matchpath_evaluation_end_to_end(tmp_path):
 
     assert result is not None
     assert result["total_records"] > 0
-    assert result["num_auto_matched"] + result["num_review"] + result["num_unmatched"] == (
-        result["total_records"]
+    assert (
+        result["num_auto_matched"] + result["num_review"] + result["num_unmatched"]
+        == (result["total_records"])
     )
     assert 0.0 <= result["precision"] <= 1.0
     assert 0.0 <= result["recall"] <= 1.0
