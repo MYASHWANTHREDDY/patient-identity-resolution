@@ -1129,3 +1129,172 @@ reads its own prior output as "existing state" (here, `read_existing_crosswalk`)
 state cleared -- not just the source tables reloaded -- whenever the underlying dataset it's
 tracking changes identity, not just size. A tier switch is exactly that kind of change even
 though it looks, superficially, like "the same tables, more rows."
+
+## Domain linking classified into three cases (Path A / Path B / match-path), not one shared strategy
+
+**Phase:** 17
+**Decision:** Every (vendor, domain) pair in the expanded 6-domain model gets classified into
+exactly one of three linking strategies before any code is written: **Path A** (the domain
+carries the same ID as that vendor's own eligibility record -- a straight join through the
+crosswalk), **Path B** (a *different* ID from the same vendor -- e.g. a separate PBM
+relationship -- needing one extra hop through a per-vendor `vendor_id_map` first), or
+**match-path** (no shared ID at all -- needs the real comparator/blocking/Fellegi-Sunter
+pipeline, not a join). `docs/domain-linking-strategy.md` is the full matrix. `VENDOR_D` (a
+lab) was added specifically to exercise match-path a second, independently-motivated way --
+unlike `VENDOR_B`'s `pharmacy_info` (a benefit file, member-level, still tied to an insurer
+relationship), a lab has no eligibility relationship to any member at all, so match-path
+isn't validated against only one scenario shape.
+**Alternatives considered:** One generic "linking adapter" interface all six domains
+implement, dispatching internally; treating every domain as match-path for uniformity (skip
+classifying, just match everything).
+**Why this:** A generic adapter would hide the fact that these are three structurally
+different problems with different costs -- Path A is free (a join), Path B is nearly free
+(one more join), match-path is the expensive, error-prone one (real matching, real
+precision/recall to measure and defend). Naming the distinction up front means each domain
+gets exactly the amount of engineering its actual linking problem requires, and a reviewer
+can see at a glance which domains were "hard" and why, rather than three joins and two
+matching passes all looking like the same kind of code.
+
+## HCPCS Level II over CPT for procedure codes
+
+**Phase:** 18
+**Decision:** Procedure codes use HCPCS Level II (CMS, free to use), not CPT.
+**Alternatives considered:** CPT (the standard most real claims data actually carries in
+practice).
+**Why this:** CPT is AMA copyrighted and licensed -- reproducing real CPT codes in a public
+portfolio repo with no license is a real risk, not a hypothetical one, for something built
+purely to be shown to recruiters. HCPCS Level II is public-domain, CMS-published, and covers
+the same kind of ground (procedures, supplies, services) closely enough that the matching
+methodology being demonstrated doesn't depend on which code set it is. When the two
+considerations are "slightly less industry-standard" vs. "copyright exposure for zero
+benefit to the thing actually being demonstrated," there's no real tradeoff.
+
+## Match-path ground truth in its own table, and asymmetric blocking as raw SQL, not new dbt models
+
+**Phase:** 20
+**Decision:** Two related choices for `pharmacy_info`/`lab_results` (no shared ID with
+anything): (1) their ground truth goes into a separate `matchpath_ground_truth` table,
+never unioned into the core `ground_truth.ground_truth` table; (2) the asymmetric blocking
+that finds match-path candidates against `conformance.patient_normalized` is written
+directly as SQL inside `scripts/run_matchpath_matching.py` (`mdm.pipeline`'s
+`_MATCHPATH_BLOCKING_PASSES`), not as new `dbt` models the way every other blocking pass in
+this project is.
+**Alternatives considered:** One combined ground-truth table with a `domain` column
+distinguishing core from match-path pairs; a proper `matching.matchpath_block_keys` /
+`matchpath_candidate_pairs` dbt model pair, mirroring `block_keys.sql`/`candidate_pairs.sql`
+exactly.
+**Why this:** A combined ground-truth table would let `mdm.evaluate`'s existing pair-based
+precision/recall logic silently treat a core record and a match-path record as a possible
+"true pair" -- they're never actual blocking/scoring candidates against each other in the
+real pipeline, so any such pair could only be a spurious label corrupting the
+already-verified Phase 0-15 metrics, for a check that would never once reflect anything the
+system actually does. Separate tables make that class of bug structurally impossible instead
+of relying on careful query-writing to avoid it. On the blocking side: this join is
+asymmetric (match-path row vs. core population) and runs once, after `run_matching` has
+already built the crosswalk it resolves against -- it doesn't fit dbt's regular symmetric
+self-join build graph the way `candidate_pairs.sql` does, and forcing it into that shape for
+consistency's own sake would be more machinery than the one-off asymmetric lookup needs.
+
+## Match-path generation initially shared the member domain's own `Faker` instance -- same bug class as Phase 19's shared-`random.Random` bug, different object
+
+**Phase:** 20
+**What was found:** `src/mdm/generator/matchpath.py`'s `generate_pharmacy_info_appearance`/
+`generate_lab_identity_appearance` call `faker.address()`/`faker.phone_number()`. Passed the
+*member domain's own* `Faker` instance (the same one `synthesize_identity` uses for names),
+this silently advanced that instance's internal RNG state every time match-path generation
+ran for an identity -- even though `matchpath_rng` (an independently-seeded
+`random.Random`) was already separate, exactly the fix Phase 19 had already applied for its
+own shared-state bug. Found by generating the same ci-tier shard with and without match-path
+generation enabled and diffing: member-domain and Phase 19 fact-domain record counts
+differed (5,043 records without, 5,040 with) even though neither domain's own logic had
+changed.
+**How to apply:** Gave match-path generation its own `Faker` instance
+(`matchpath_faker = Faker(); matchpath_faker.seed_instance(shard_seed + 2_000_000)`),
+matching `matchpath_rng`'s seed offset. Re-verified byte-identical member-domain and Phase 19
+fact-domain output with match-path generation on vs. off. The general lesson from both
+bugs now: *any* stateful generator object (not just `random.Random`) shared across
+independently-designed generation paths is a determinism hazard -- each new generation
+concern needs its own fully independent instance of every stateful object it touches, not
+just the ones that were the problem last time.
+**A related gap found afterward, not a generation bug:** once `serving.matchpath_resolution`
+existed, the full `dbt build` (which `fct_pharmacy_info.sql`/`fct_lab_results.sql` are part
+of) started depending on `run_matchpath_matching` having already run -- but `make pipeline`
+and three pre-existing quality-gate/snapshot tests only ran `run_matching` before a full
+`dbt build`, since nothing in `models/serving` had depended on match-path output before this
+phase. Added a `match-path` Makefile target between `match` and `dbt-build`, and updated the
+three tests to call `run_matchpath_matching` in the same place the real pipeline now does --
+a reminder that adding a new consumer of an existing artifact can silently change what
+"finished" means for every caller upstream of it, not just the one being written.
+
+## `member_360`'s cross-domain summary assumed one `fct_pharmacy_info` row per person -- untrue at dev-tier scale
+
+**Phase:** 21
+**What was found:** `member_360.sql`'s `pharmacy_info_summary` CTE selected straight from
+`fct_pharmacy_info` with no `GROUP BY`, on the reasoning "one source record maps to at most
+one identity at generation time." True, but not the same claim as "at most one
+`fct_pharmacy_info` row resolves to the same `patient_global_id`" -- two *different* source
+records can each independently auto-match to the same person, a real precision limit of
+probabilistic matching (two similar-enough people, or a core cluster that split into more
+than one golden record with each half separately attracting a match), not a bug in the
+matcher itself. Passed cleanly at `ci` tier's small population; failed dev tier's
+`unique_member_360_patient_global_id` dbt test with 17 real duplicate `patient_global_id`s.
+**How to apply:** Grouped `pharmacy_info_summary` by `patient_global_id` like every other
+domain CTE in the view, and added a `pharmacy_info_match_count` column so the collision is
+visible in the data instead of silently resolved away -- the same instinct behind
+`serving.review_queue` existing at all: real uncertainty in probabilistic matching gets
+recorded, not hidden behind a `LIMIT 1`. General lesson: an assumption phrased as "true at
+the source" doesn't automatically survive a join through a matching step with imperfect
+precision -- it has to be re-verified downstream, not inherited.
+**A second, unrelated finding the same debugging session turned up:** DuckDB has no
+`+(DATE, BIGINT)` overload (`fill_date + days_supply`, where `days_supply` is `int64` in the
+pyarrow schema) -- only `+(DATE, INTEGER)`. Needed an explicit `cast(days_supply as integer)`
+before the addition. A small, easy-to-hit cross-type gotcha worth remembering anywhere else
+this project does date-plus-integer arithmetic against a `BIGINT`-typed column.
+
+## The Member 360 API writes new identities to the serving layer only -- a speed-layer overlay, not an ingestion path
+
+**Phase:** 22
+**Decision:** `POST /resolve`'s "no match found" path mints a new `patient_global_id` and
+writes it directly to `serving.crosswalk`/`member_demographics`/`membership`/
+`member_alternate_identifier` -- never to `raw_standard`/`conformance`. The new identity is
+visible immediately (`member_360` is a live view), but isn't durable past the next full
+batch `run_matching()`, which rebuilds `serving.crosswalk` from
+`conformance.patient_normalized`'s record keys only -- an API-minted `record_key` was never
+added to a vendor feed, so it has no representation there and isn't carried forward.
+**Alternatives considered:** Writing the new record into `raw_standard` (as if from a
+synthetic "API vendor") and triggering an incremental `dbt run` + `run_matching` so the
+identity becomes fully durable and re-discoverable by future resolve calls immediately.
+**Why this:** Making an API call synchronously trigger a `dbt build` is the wrong shape for a
+request/response API regardless of how fast the build happens to be at demo-tier volumes --
+it doesn't survive to real ingestion volumes, and it conflates two different
+consistency guarantees (a live-view read that reflects this call sits differently than a
+resolve that requires a build to complete first). This is a deliberate, documented
+speed-layer/batch-layer split, made explicit in a test
+(`test_resolving_the_same_new_person_twice_mints_two_ids`) rather than left as a surprise for
+whoever notices it first.
+**A real bug found by manually curling a running server, not by the automated tests:**
+`member_360`'s `alternate_identifiers` array reconstructs
+`source_vendor || ':' || source_record_id`. The new-identity write path passed the
+*already-prefixed* `record_key` (`f"API:{uuid4().hex}"`) as `source_record_id`, rendering as
+`"API:API:9bc943fa..."` in a live response. No automated test asserted on
+`alternate_identifiers`' exact string content, only its presence -- only reading real JSON
+off a real running server caught it. Fixed by separating `source_record_id` (the bare uuid)
+from `record_key` (built *from* it), and treating this as a standing reminder that shape-only
+assertions ("the field exists," "the list is non-empty") don't substitute for reading actual
+rendered output at least once per feature.
+
+## Streamlit's `AppTest` element references go stale across a `.run()` rerun
+
+**Phase:** 23
+**What was found:** `AppTest.tabs[i].set_value(x).run()` reruns the *entire* script from
+scratch. Continuing to read `.subheader`/`.selectbox`/`.exception` off the `tab` object
+captured *before* that `.run()` call silently returns the previous render's tree -- it
+doesn't raise, and a weak assertion (`assert not tab.exception`, checking only for absence)
+passes vacuously against a stale, empty-looking snapshot just as easily as against a correct
+one. The pre-existing Phase 9 dashboard test only ever made assertions of that weak shape,
+so it never surfaced this; a new Phase 23 test asserting on specific rendered content
+(exact `subheader` labels, `selectbox` options) failed in a way that traced back to reading
+the wrong tree, not a real application bug.
+**How to apply:** Re-fetch the tab (`_golden_records_tab(at)`) from `at.tabs` after every
+`.run()` before asserting on anything rendered, not just on `at.exception`/`tab.exception`.
+Worth remembering for any future `AppTest`-based test that checks more than "did it crash."

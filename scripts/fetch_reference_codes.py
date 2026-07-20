@@ -89,7 +89,9 @@ def _get_json(url: str) -> dict | list:
     raise RuntimeError(f"failed after {RETRY_ATTEMPTS} attempts: {url}") from last_error
 
 
-def _nlm_query(endpoint: str, code_field: str, name_field: str, terms: str) -> list[tuple[str, str]]:
+def _nlm_query(
+    endpoint: str, code_field: str, name_field: str, terms: str
+) -> list[tuple[str, str]]:
     """Caller checks len(result) >= PAGE_CAP to detect a truncated (not genuinely
     complete) bucket -- the response's own `total` isn't reliable for that check, since
     it's the count matching `terms` overall, not a signal that this page was cut short."""
