@@ -36,3 +36,50 @@ models:
       - name: block_key
         tests:
           - not_null
+
+  - name: matchpath_block_keys
+    description: >
+      Scale-tier match-path blocking (Phase 20): the same shape as block_keys, plus a
+      `side` column distinguishing the core population from the two match-path domains.
+    columns:
+      - name: record_key
+        tests:
+          - not_null
+      - name: side
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["core", "matchpath"]
+      - name: blocking_pass
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["bp_dob_lname", "bp_year_names", "bp_coarse"]
+      - name: block_key
+        tests:
+          - not_null
+
+  - name: matchpath_block_stats
+    description: "Block size distribution, measured on the core side only -- see the model's own docstring."
+    columns:
+      - name: record_count
+        tests:
+          - not_null
+
+  - name: matchpath_candidate_pairs
+    description: >
+      Match-path blocking's raw output: one row per (match-path record, core record,
+      pass that found it). record_key_a/record_key_b so spark_jobs/score_pairs.py reads
+      this exactly like candidate_pairs.sql, unmodified.
+    columns:
+      - name: record_key_a
+        tests:
+          - not_null
+      - name: record_key_b
+        tests:
+          - not_null
+      - name: block_key
+        tests:
+          - not_null

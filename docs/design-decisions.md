@@ -1298,3 +1298,59 @@ the wrong tree, not a real application bug.
 **How to apply:** Re-fetch the tab (`_golden_records_tab(at)`) from `at.tabs` after every
 `.run()` before asserting on anything rendered, not just on `at.exception`/`tab.exception`.
 Worth remembering for any future `AppTest`-based test that checks more than "did it crash."
+
+## Match-path at the scale tier: reuse score_pairs.py unmodified via a union table, not a new Spark job
+
+**Phase:** 20 (extended to BigQuery after the fact, costed out and built on request)
+**Decision:** Match-path scoring at scale reuses `spark_jobs/score_pairs.py` completely
+unmodified -- pointed at new tables via its existing `--candidate-pairs-table`/
+`--patient-normalized-table`/`--output-table` flags, rather than writing a second Spark job.
+The trick: `mdm.backends.spark.join_pairs_with_records` joins *both* sides of a candidate
+pair against one broadcast `patient_normalized`-shaped table, so a match-path candidate pair
+(`record_key_a` = match-path, `record_key_b` = core) needs a table containing *both*
+populations. `conformance/patient_normalized_with_matchpath.sql` (a new dbt model, a plain
+`UNION ALL` of `patient_normalized` + the two match-path domains, minimal columns) is that
+table. Blocking is likewise new dbt models
+(`matchpath_block_keys.sql`/`matchpath_block_stats.sql`/`matchpath_candidate_pairs.sql`,
+in `models/blocking/` alongside the core ones) rather than the raw-SQL-in-Python approach
+the local/DuckDB tier uses (`mdm.pipeline._MATCHPATH_BLOCKING_PASSES`) -- at scale, blocking
+naturally happens through the regular dbt build graph the same way core blocking already
+does; only *resolution* (after scoring) needs a standalone script, since it depends on
+`serving.crosswalk` already existing.
+**Alternatives considered:** A second Spark job specific to match-path scoring; keeping
+blocking as an ad-hoc Python/BigQuery-client script at scale too, for symmetry with the
+local tier.
+**Why this:** `score_candidate_pairs`/`join_pairs_with_records` don't know or care what
+population a `record_key` belongs to -- they just need it findable in the broadcast table.
+Writing a second, nearly-identical Spark job to score a different table shape would
+duplicate real logic (comparators, Jaro-Winkler, Fellegi-Sunter weights) purely because the
+*inputs* differ, which is exactly the kind of two-implementations drift
+PROJECT_CONSTITUTION.md #8 exists to prevent. The local-tier vs. scale-tier blocking
+asymmetry (raw SQL vs. dbt models) is deliberate, not an inconsistency: the *shape* of
+orchestration is allowed to differ by backend when the backend's own cost/build-graph model
+calls for it (block_keys.sql/candidate_pairs.sql already establish that dbt is where
+blocking lives at scale); the blocking *keys and passes themselves* are identical everywhere
+either way.
+**A real memory lesson applied proactively, not rediscovered:** the naive way to resolve
+match-path matches -- download all of `matching.matchpath_pair_scores` client-side and pick
+the max score per match-path record in pandas -- is exactly Phase 14's `read_pair_scores`
+memory problem (pair-count-scaled data, hundreds of millions of rows at full scale) applied
+to a new table. `mdm.backends.bigquery._read_best_matchpath_candidate` does the
+`ROW_NUMBER() OVER (PARTITION BY record_key_a ORDER BY score DESC) = 1` aggregation
+server-side instead, so the downloaded result is bounded by the number of *distinct
+match-path records*, never the pair count. Verified for real against a live 10%-scale
+sample (30.6M scored candidate pairs): the query returned exactly one row per distinct
+`record_key_a` (234,377 candidates for 234,377 distinct records), confirming the
+aggregation logic before it was ever exercised against the full pair count.
+**Also verified live**, not just compiled: `dbt compile --target prod` plus real `bq query`
+dry-runs and executions against a 10%-scale sample joined against the actual, full
+5,048,389-row `conformance.patient_normalized` -- the new dbt-model-based
+`matchpath_candidate_pairs` produced byte-identical candidate-pair counts per blocking pass
+(170,741 / 651,153 / 29,823,680) to an independently hand-written equivalent query run
+earlier during cost estimation, a real cross-check rather than trusting one code path.
+`spark_jobs/score_pairs.py` itself could not be exercised end-to-end locally against real
+data -- this machine hits the same pre-existing Windows/PySpark "Python worker" launch
+failure documented since Phase 12 (`tests/unit/test_backends_spark.py`), unrelated to this
+work -- so its compatibility rests on the schema/argument-contract check above (verified)
+plus its already-existing test coverage for the unchanged scoring logic itself, not a fresh
+end-to-end local run.

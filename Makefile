@@ -1,4 +1,4 @@
-.PHONY: install install-dev lint format test data data-dev data-ci dbt-build-pre dbt-build evaluate estimate-params match match-path quality-checks pipeline dashboard api demo tf-plan tf-apply tf-destroy upload-gcs load-bigquery dbt-build-prod verify-parity package-spark upload-spark-deps dataproc-score-pairs dataproc-cluster-identities match-bigquery quality-checks-bigquery airflow-up airflow-down airflow-logs airflow-trigger-ingestion airflow-trigger-conformance airflow-trigger-dedup
+.PHONY: install install-dev lint format test data data-dev data-ci dbt-build-pre dbt-build evaluate estimate-params match match-path quality-checks pipeline dashboard api demo tf-plan tf-apply tf-destroy upload-gcs load-bigquery dbt-build-prod verify-parity package-spark upload-spark-deps dataproc-score-pairs dataproc-score-matchpath-pairs dataproc-cluster-identities match-bigquery match-path-bigquery quality-checks-bigquery airflow-up airflow-down airflow-logs airflow-trigger-ingestion airflow-trigger-conformance airflow-trigger-dedup
 
 TIER ?= dev
 SEED ?= 42
@@ -125,6 +125,22 @@ dataproc-score-pairs: upload-spark-deps
 		--files=gs://$(BUCKET)/dependencies/fs_params.yml,gs://$(BUCKET)/dependencies/nicknames.yml \
 		-- --project $(PROJECT) --bq-temp-bucket $(BUCKET)
 
+# Phase 20 at scale: the identical score_pairs.py already uploaded above, pointed at the
+# match-path tables instead of the default ones -- no new Spark code (see
+# dbt/models/blocking/matchpath_candidate_pairs.sql / conformance/patient_normalized_with_
+# matchpath.sql, which shape the inputs so this script needs zero changes).
+dataproc-score-matchpath-pairs: upload-spark-deps
+	gcloud dataproc batches submit pyspark gs://$(BUCKET)/dependencies/score_pairs.py \
+		--project=$(PROJECT) --region=us-central1 \
+		--batch=score-matchpath-pairs-$$(date +%Y%m%d-%H%M%S) \
+		--service-account=mdm-pipeline@$(PROJECT).iam.gserviceaccount.com \
+		--py-files=gs://$(BUCKET)/dependencies/mdm.zip,gs://$(BUCKET)/dependencies/rapidfuzz.zip \
+		--files=gs://$(BUCKET)/dependencies/fs_params.yml,gs://$(BUCKET)/dependencies/nicknames.yml \
+		-- --project $(PROJECT) --bq-temp-bucket $(BUCKET) \
+		--candidate-pairs-table matching.matchpath_candidate_pairs \
+		--patient-normalized-table conformance.patient_normalized_with_matchpath \
+		--output-table matching.matchpath_pair_scores
+
 # --upper-threshold is 20.5, NOT config/matching.yml's 9.0413 (that value is dev/ci-tier
 # only -- see the comment there): measured directly against real scale-tier ground truth
 # (Phase 14, docs/design-decisions.md), the same FS score is far less precise at 5M records
@@ -145,6 +161,11 @@ dataproc-cluster-identities: upload-spark-deps
 # output (mdm.pipeline's DuckDB logic, reused unchanged -- see docs/design-decisions.md).
 match-bigquery:
 	python scripts/run_matching_bigquery.py --project $(PROJECT)
+
+# Phase 20 at scale: must run after match-bigquery (needs serving.crosswalk) and
+# dataproc-score-matchpath-pairs (needs matching.matchpath_pair_scores).
+match-path-bigquery:
+	python scripts/run_matchpath_matching_bigquery.py --project $(PROJECT)
 
 quality-checks-bigquery:
 	python scripts/run_quality_checks_bigquery.py --project $(PROJECT)

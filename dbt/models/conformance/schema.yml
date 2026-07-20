@@ -136,6 +136,17 @@ models:
               arguments:
                 values: ["M", "F", "U"]
 
+  - name: patient_normalized_with_matchpath
+    description: >
+      Scale-tier match-path scoring (Phase 20): patient_normalized plus the two match-path
+      domains, minimal columns (record_key + the five comparator fields) -- lets
+      spark_jobs/score_pairs.py score matchpath_candidate_pairs unmodified.
+    columns:
+      - name: record_key
+        tests:
+          - unique
+          - not_null
+
   - name: lab_results_normalized
     description: >
       Layer 2, fact grain (Phase 20). One row per test result, never deduplicated --

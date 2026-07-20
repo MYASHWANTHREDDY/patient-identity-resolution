@@ -60,6 +60,85 @@ def read_pair_scores(client, project: str, *, lower: float, upper: float) -> pd.
     return client.query(query).to_dataframe()
 
 
+def _read_best_matchpath_candidate(client, project: str, *, score_filter: str) -> pd.DataFrame:
+    """One row per match-path record_key: its single highest-scoring candidate within
+    `score_filter`'s band. `ROW_NUMBER() ... = 1` server-side, not a client-side groupby --
+    matching.matchpath_pair_scores is pair-count-scaled (hundreds of millions of rows at the
+    scale tier, same order of magnitude as matching.pair_scores), so downloading the whole
+    table to pick a max client-side has the identical memory problem read_pair_scores above
+    already exists to avoid (see docs/design-decisions.md, Phase 14). The result set here is
+    bounded by the number of *distinct match-path records* (a few million at most), not the
+    pair count."""
+    query = f"""
+        WITH ranked AS (
+            SELECT record_key_a, record_key_b, score,
+                ROW_NUMBER() OVER (
+                    PARTITION BY record_key_a ORDER BY score DESC, record_key_b
+                ) AS rn
+            FROM `{project}.matching.matchpath_pair_scores`
+            WHERE {score_filter}
+        )
+        SELECT record_key_a, record_key_b, score FROM ranked WHERE rn = 1
+    """
+    return client.query(query).to_dataframe()
+
+
+def read_best_matchpath_auto_matches(client, project: str, *, upper: float) -> pd.DataFrame:
+    return _read_best_matchpath_candidate(client, project, score_filter=f"score >= {upper}")
+
+
+def read_best_matchpath_review_candidates(
+    client, project: str, *, lower: float, upper: float
+) -> pd.DataFrame:
+    return _read_best_matchpath_candidate(
+        client, project, score_filter=f"score >= {lower} AND score < {upper}"
+    )
+
+
+def write_matchpath_tables(
+    client, project: str, resolution_rows: list[dict], review_rows: list[dict]
+) -> None:
+    """serving.matchpath_resolution / serving.matchpath_review_queue -- the BigQuery
+    siblings of mdm.pipeline._write_matchpath_tables' DuckDB tables. Record-count-scaled
+    (bounded by the number of match-path records, not the pair count), so a single
+    WRITE_TRUNCATE load each, same as write_crosswalk_and_events above -- no batching
+    needed."""
+    resolution_columns = [
+        "domain",
+        "record_key",
+        "source_record_id",
+        "patient_global_id",
+        "matched_core_record_key",
+        "match_score",
+    ]
+    resolution_df = (
+        pd.DataFrame(resolution_rows)[resolution_columns]
+        if resolution_rows
+        else pd.DataFrame(columns=resolution_columns)
+    )
+    _load_dataframe(
+        client,
+        project,
+        "serving.matchpath_resolution",
+        resolution_df,
+        disposition="WRITE_TRUNCATE",
+    )
+
+    review_columns = ["domain", "record_key", "candidate_core_record_key", "score", "status"]
+    review_df = (
+        pd.DataFrame(review_rows)[review_columns]
+        if review_rows
+        else pd.DataFrame(columns=review_columns)
+    )
+    _load_dataframe(
+        client,
+        project,
+        "serving.matchpath_review_queue",
+        review_df,
+        disposition="WRITE_TRUNCATE",
+    )
+
+
 def read_existing_crosswalk(client, project: str) -> dict[str, CrosswalkEntry]:
     """Empty dict on a fresh project -- same "table doesn't exist yet" handling as
     mdm.pipeline's DuckDB-specific _load_existing_crosswalk, via INFORMATION_SCHEMA instead
