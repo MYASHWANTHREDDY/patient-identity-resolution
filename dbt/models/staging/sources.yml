@@ -11,3 +11,14 @@ sources:
       - name: vendor_a
       - name: vendor_b
       - name: vendor_c
+      # Phase 19 fact domains (docs/domain-linking-strategy.md's join-path cells): one raw
+      # table per (vendor, domain), field-naming consistent across vendors within a domain
+      # (unlike vendor_a/b/c above -- see src/mdm/generator/facts.py's module docstring for
+      # why that deliberate variance doesn't apply here), plus the Path B id map.
+      - name: vendor_a_medical_history
+      - name: vendor_a_medical_claims
+      - name: vendor_a_pharmacy_claims
+      - name: vendor_b_medical_claims
+      - name: vendor_c_medical_history
+      - name: vendor_c_pharmacy_claims
+      - name: vendor_id_map

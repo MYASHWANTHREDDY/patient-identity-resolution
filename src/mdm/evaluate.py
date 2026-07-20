@@ -169,6 +169,50 @@ def run_blocking_evaluation(tier: str, db_path: Path, true_pairs: set[PairKey]) 
     }
 
 
+FACT_DOMAINS = ("medical_history", "medical_claims", "pharmacy_claims")
+
+
+def run_fact_table_evaluation(tier: str, db_path: Path) -> dict | None:
+    """Row counts for Phase 19's join-path fact tables -- conformance vs. serving, so a
+    mismatch here would be the same conservation signal the dbt singular tests already
+    check, just visible in results.md alongside everything else (PROJECT_CONSTITUTION.md
+    #14). Returns None if the fact tables haven't been built yet (e.g. a pre-Phase-19
+    database, or --skip-scoring-style partial runs) rather than erroring -- this section is
+    optional the same way blocking/scoring results already are."""
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        tables = {
+            row[0]
+            for row in con.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'serving'"
+            ).fetchall()
+        }
+        if not any(f"fct_{domain}" in tables for domain in FACT_DOMAINS):
+            return None
+
+        counts = {}
+        for domain in FACT_DOMAINS:
+            fct_table = f"fct_{domain}"
+            normalized_table = f"{domain}_normalized"
+            if fct_table not in tables:
+                continue
+            conformance_count = con.execute(
+                f"SELECT count(*) FROM conformance.{normalized_table}"
+            ).fetchone()[0]
+            fact_count = con.execute(f"SELECT count(*) FROM serving.{fct_table}").fetchone()[0]
+            distinct_members = con.execute(
+                f"SELECT count(DISTINCT patient_global_id) FROM serving.{fct_table}"
+            ).fetchone()[0]
+            counts[domain] = {
+                "conformance_rows": conformance_count,
+                "fact_rows": fact_count,
+                "distinct_members": distinct_members,
+            }
+        return {"tier": tier, "counts": counts}
+    finally:
+        con.close()
+
+
 def load_records_by_key(db_path: Path) -> dict[str, dict]:
     con = duckdb.connect(str(db_path), read_only=True)
     try:
@@ -272,7 +316,10 @@ def plot_pr_curve(fs_curve: pd.DataFrame, naive_curve: pd.DataFrame, out_path: P
 
 
 def render_results_md(
-    result: dict, blocking_result: dict | None = None, scoring_result: dict | None = None
+    result: dict,
+    blocking_result: dict | None = None,
+    scoring_result: dict | None = None,
+    fact_table_result: dict | None = None,
 ) -> str:
     m = result["metrics"]
     lines = [
@@ -369,6 +416,24 @@ def render_results_md(
             plot_path = Path(scoring_result["plot_path"])
             lines += [f"![PR curve](img/{plot_path.name})", ""]
 
+    if fact_table_result is not None and fact_table_result["counts"]:
+        lines += [
+            f"## Fact tables ({fact_table_result['tier']} tier, Phase 19)",
+            "",
+            "Conformance row count vs. serving row count should match exactly -- the same",
+            "conservation check the dbt singular tests already enforce, reported here too",
+            "(PROJECT_CONSTITUTION.md #14).",
+            "",
+            "| Domain | Conformance rows | Fact rows | Distinct members |",
+            "|---|---|---|---|",
+        ]
+        for domain, counts in fact_table_result["counts"].items():
+            lines.append(
+                f"| {domain} | {counts['conformance_rows']} | {counts['fact_rows']} | "
+                f"{counts['distinct_members']} |"
+            )
+        lines.append("")
+
     return "\n".join(lines)
 
 
@@ -413,9 +478,12 @@ def main(argv: list[str] | None = None) -> dict:
             args.tier, db_path, true_pairs, fs_params, nickname_index
         )
 
+    fact_table_result = run_fact_table_evaluation(args.tier, db_path)
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(
-        render_results_md(result, blocking_result, scoring_result), encoding="utf-8"
+        render_results_md(result, blocking_result, scoring_result, fact_table_result),
+        encoding="utf-8",
     )
 
     m = result["metrics"]
@@ -435,6 +503,12 @@ def main(argv: list[str] | None = None) -> dict:
             f"lower={scoring_result['lower_threshold']:.4f} "
             f"review_rate={scoring_result['review_queue_rate']:.4f}"
         )
+    if fact_table_result and fact_table_result["counts"]:
+        fact_summary = " ".join(
+            f"{domain}={counts['fact_rows']}"
+            for domain, counts in fact_table_result["counts"].items()
+        )
+        print(f"fact_tables: {fact_summary}")
     return result
 
 

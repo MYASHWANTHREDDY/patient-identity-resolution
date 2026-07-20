@@ -52,7 +52,7 @@ def test_generate_shard_different_shard_index_changes_output():
 
 
 def test_generate_shard_first_appearance_per_identity_is_exact():
-    _vendor_rows, ground_truth_rows = generate_shard(
+    _vendor_rows, ground_truth_rows, _fact_rows = generate_shard(
         0, 0, 300, seed_base=42, nickname_table=NICKNAME_TABLE
     )
     seen_identities = set()
@@ -64,7 +64,7 @@ def test_generate_shard_first_appearance_per_identity_is_exact():
 
 
 def test_generate_shard_record_key_and_ground_truth_counts_match():
-    vendor_rows, ground_truth_rows = generate_shard(
+    vendor_rows, ground_truth_rows, _fact_rows = generate_shard(
         0, 0, 300, seed_base=42, nickname_table=NICKNAME_TABLE
     )
     total_vendor_records = sum(len(rows) for rows in vendor_rows.values())
@@ -74,7 +74,7 @@ def test_generate_shard_record_key_and_ground_truth_counts_match():
 
 def test_generate_shard_average_records_per_identity_is_close_to_two():
     num_identities = 2000
-    _vendor_rows, ground_truth_rows = generate_shard(
+    _vendor_rows, ground_truth_rows, _fact_rows = generate_shard(
         0, 0, num_identities, seed_base=42, nickname_table=NICKNAME_TABLE
     )
     avg = len(ground_truth_rows) / num_identities
@@ -82,7 +82,7 @@ def test_generate_shard_average_records_per_identity_is_close_to_two():
 
 
 def test_generate_shard_produces_all_five_noise_types_at_scale():
-    _vendor_rows, ground_truth_rows = generate_shard(
+    _vendor_rows, ground_truth_rows, _fact_rows = generate_shard(
         0, 0, 2000, seed_base=42, nickname_table=NICKNAME_TABLE
     )
     noise_types = Counter(row["noise_type"] for row in ground_truth_rows)

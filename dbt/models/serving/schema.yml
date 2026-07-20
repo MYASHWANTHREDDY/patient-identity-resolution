@@ -19,3 +19,54 @@ models:
 
   - name: agg_dedup_metrics
     description: "Dashboard-facing aggregates (Phase 9 Overview tab): one row per build."
+
+  - name: fct_medical_history
+    description: >
+      Phase 19 join-path fact table (Path A). One row per encounter -- never deduplicated,
+      never survived. patient_global_id is guaranteed non-null by construction (an inner
+      join through member_alternate_identifier), but tested explicitly anyway rather than
+      trusted implicitly (docs/domain-linking-strategy.md).
+    columns:
+      - name: patient_global_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: source('serving_written', 'membership')
+                field: patient_global_id
+      - name: encounter_key
+        tests:
+          - unique
+          - not_null
+
+  - name: fct_medical_claims
+    description: "Phase 19 join-path fact table (Path A). One row per claim."
+    columns:
+      - name: patient_global_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: source('serving_written', 'membership')
+                field: patient_global_id
+      - name: claim_key
+        tests:
+          - unique
+          - not_null
+
+  - name: fct_pharmacy_claims
+    description: >
+      Phase 19 join-path fact table (Path B -- two joins, through vendor_id_map_normalized
+      then the crosswalk, not a direct one like the two fact tables above).
+    columns:
+      - name: patient_global_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: source('serving_written', 'membership')
+                field: patient_global_id
+      - name: rx_key
+        tests:
+          - unique
+          - not_null

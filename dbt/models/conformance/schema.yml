@@ -35,3 +35,54 @@ models:
           - accepted_values:
               arguments:
                 values: ["M", "F", "U"]
+
+  - name: medical_history_normalized
+    description: >
+      Layer 2, fact grain (Phase 19, Path A). One row per encounter, never deduplicated --
+      not a golden record, so no unique test on anything but the compound key.
+    columns:
+      - name: encounter_key
+        tests:
+          - unique
+          - not_null
+      - name: member_id
+        tests:
+          - not_null
+
+  - name: medical_claims_normalized
+    description: "Layer 2, fact grain (Phase 19, Path A). One row per claim."
+    columns:
+      - name: claim_key
+        tests:
+          - unique
+          - not_null
+      - name: member_id
+        tests:
+          - not_null
+      - name: claim_status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["paid", "denied", "pending"]
+
+  - name: pharmacy_claims_normalized
+    description: >
+      Layer 2, fact grain (Phase 19, Path B). pbm_member_id is deliberately *not* resolved
+      to patient_global_id here -- that's fct_pharmacy_claims.sql's job, via
+      vendor_id_map_normalized.
+    columns:
+      - name: rx_key
+        tests:
+          - unique
+          - not_null
+      - name: pbm_member_id
+        tests:
+          - not_null
+
+  - name: vendor_id_map_normalized
+    description: "Layer 2 pass-through for Path B's per-vendor pbm_member_id -> enrollment_member_id map."
+    columns:
+      - name: pbm_member_id
+        tests:
+          - unique
+          - not_null

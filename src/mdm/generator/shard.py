@@ -13,9 +13,20 @@ import random
 
 from faker import Faker
 
+from mdm.generator.facts import (
+    MEDICAL_CLAIMS_VENDORS,
+    MEDICAL_HISTORY_VENDORS,
+    PHARMACY_CLAIMS_VENDORS,
+    generate_medical_claims,
+    generate_medical_history,
+    generate_pharmacy_claims,
+    mint_pbm_member_id,
+)
 from mdm.generator.identity import synthesize_identity
 from mdm.generator.noise import apply_noise, choose_requested_noise_type
 from mdm.generator.vendors import VENDOR_HAS_SSN, VENDORS, render_record
+
+FACT_DOMAINS = ("medical_history", "medical_claims", "pharmacy_claims")
 
 CHUNK_SIZE = 2000  # identities per shard, independent of --workers
 
@@ -55,20 +66,49 @@ def plan_appearances(rng: random.Random) -> list[tuple[str, int]]:
     return appearances
 
 
+def _empty_fact_rows() -> dict[str, dict[str, list[dict]] | list[dict]]:
+    return {
+        "medical_history": {v: [] for v in MEDICAL_HISTORY_VENDORS},
+        "medical_claims": {v: [] for v in MEDICAL_CLAIMS_VENDORS},
+        "pharmacy_claims": {v: [] for v in PHARMACY_CLAIMS_VENDORS},
+        "vendor_id_map": [],
+    }
+
+
 def generate_shard(
     shard_index: int,
     id_start: int,
     id_end: int,
     seed_base: int,
     nickname_table: dict[str, list[str]],
-) -> tuple[dict[str, list[dict]], list[dict]]:
+    icd10cm_codes: list[str] | None = None,
+    hcpcs_codes: list[str] | None = None,
+    ndc_codes: list[str] | None = None,
+) -> tuple[dict[str, list[dict]], list[dict], dict]:
+    """icd10cm_codes/hcpcs_codes/ndc_codes are None in tests that only care about the
+    member domain; fact-domain generation is skipped entirely when they're absent rather
+    than failing, since not every caller needs Phase 19's fact tables (P7: this function's
+    original member-only behavior stays available, not silently changed underneath it)."""
     shard_seed = seed_base + shard_index
     faker = Faker()
     faker.seed_instance(shard_seed)
     rng = random.Random(shard_seed)
+    # Independently seeded, not a second use of `rng` -- fact generation draws a different
+    # number of random values per identity depending on _record_count's outcome, and if it
+    # shared `rng` with the member-domain loop below, that would shift every *later*
+    # identity's member-domain rng state too (noise types, appearance patterns), silently
+    # changing already-verified Phase 0-15 output the moment Phase 19 fact generation was
+    # turned on. A separate stream keeps the two concerns from perturbing each other, so
+    # generate_shard(..., icd10cm_codes=None) and a facts-enabled call produce byte-identical
+    # member-domain output for the same identities (found by testing: they didn't, before
+    # this fix -- record counts differed between the two).
+    facts_rng = random.Random(shard_seed + 1_000_000)
+
+    generate_facts = icd10cm_codes is not None and hcpcs_codes is not None and ndc_codes is not None
 
     vendor_rows: dict[str, list[dict]] = {v: [] for v in VENDORS}
     ground_truth_rows: list[dict] = []
+    fact_rows = _empty_fact_rows()
 
     for identity_index in range(id_start, id_end):
         identity = synthesize_identity(identity_index, faker, rng, nickname_table)
@@ -107,12 +147,56 @@ def generate_shard(
                 }
             )
 
-    return vendor_rows, ground_truth_rows
+            # Fact-domain records key off the primary registration only (appearance_seq
+            # == 0) -- a rare within-vendor duplicate enrollment doesn't get its own
+            # separate claims history, since it's the same person's real activity either
+            # way (docs/domain-linking-strategy.md doesn't model claims-level dedup).
+            if generate_facts and appearance_seq == 0:
+                if vendor in MEDICAL_HISTORY_VENDORS:
+                    fact_rows["medical_history"][vendor].extend(
+                        generate_medical_history(
+                            facts_rng,
+                            member_id=record_id,
+                            identity_index=identity_index,
+                            icd10cm_codes=icd10cm_codes,
+                        )
+                    )
+                if vendor in MEDICAL_CLAIMS_VENDORS:
+                    fact_rows["medical_claims"][vendor].extend(
+                        generate_medical_claims(
+                            facts_rng,
+                            member_id=record_id,
+                            identity_index=identity_index,
+                            icd10cm_codes=icd10cm_codes,
+                            hcpcs_codes=hcpcs_codes,
+                        )
+                    )
+                if vendor in PHARMACY_CLAIMS_VENDORS:
+                    pbm_member_id = mint_pbm_member_id(facts_rng, identity_index)
+                    claims = generate_pharmacy_claims(
+                        facts_rng,
+                        pbm_member_id=pbm_member_id,
+                        identity_index=identity_index,
+                        ndc_codes=ndc_codes,
+                    )
+                    if claims:
+                        fact_rows["pharmacy_claims"][vendor].extend(claims)
+                        fact_rows["vendor_id_map"].append(
+                            {
+                                "source_vendor": vendor,
+                                "pbm_member_id": pbm_member_id,
+                                "enrollment_member_id": record_id,
+                            }
+                        )
+
+    return vendor_rows, ground_truth_rows, fact_rows
 
 
 def generate_shard_task(
-    args: tuple[int, int, int, int, dict[str, list[str]]],
-) -> tuple[dict[str, list[dict]], list[dict]]:
+    args: tuple[int, int, int, int, dict[str, list[str]], list[str] | None, list[str] | None, list[str] | None],
+) -> tuple[dict[str, list[dict]], list[dict], dict]:
     """multiprocessing-friendly single-argument wrapper around generate_shard."""
-    shard_index, id_start, id_end, seed_base, nickname_table = args
-    return generate_shard(shard_index, id_start, id_end, seed_base, nickname_table)
+    shard_index, id_start, id_end, seed_base, nickname_table, icd10cm_codes, hcpcs_codes, ndc_codes = args
+    return generate_shard(
+        shard_index, id_start, id_end, seed_base, nickname_table, icd10cm_codes, hcpcs_codes, ndc_codes
+    )
