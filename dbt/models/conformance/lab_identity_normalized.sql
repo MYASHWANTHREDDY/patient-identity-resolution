@@ -17,7 +17,7 @@ select
     upper(trim(last_name)) as last_name,
     {{ parse_vendor_date('dob', '%Y-%m-%d') }} as dob,
     case upper(trim(gender)) when 'M' then 'M' when 'F' then 'F' else 'U' end as gender,
-    cast(null as varchar) as ssn,
+    cast(null as string) as ssn,
     {{ phonetic_key('first_name') }} as first_name_phonetic,
     {{ phonetic_key('last_name') }} as last_name_phonetic,
     extract(year from {{ parse_vendor_date('dob', '%Y-%m-%d') }}) as dob_year,

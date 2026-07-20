@@ -15,12 +15,12 @@ select
     source_record_id || ':' || cast(
         row_number() over (
             partition by source_record_id order by test_date, test_code, result_value
-        ) as varchar
+        ) as string
     ) as lab_result_key,
     source_record_id,
     cast(test_date as date) as test_date,
     test_code,
-    cast(result_value as double) as result_value,
+    {{ cast_double('result_value') }} as result_value,
     result_unit,
     abnormal_flag
 from {{ source('raw_standard', 'lab_results') }}
