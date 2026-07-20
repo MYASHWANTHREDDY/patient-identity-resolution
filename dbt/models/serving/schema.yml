@@ -10,11 +10,40 @@ models:
           - not_null
 
   - name: member_360
-    description: "Golden record + every alternate identifier + a field_lineage row count."
+    description: >
+      Golden record + every alternate identifier + a field_lineage row count + (Phase 21)
+      a cross-domain summary over every fact table. A live view, recomputed per query --
+      people with zero records in a given domain still appear, with 0/null summary
+      columns, never dropped (left joins throughout).
     columns:
       - name: patient_global_id
         tests:
           - unique
+          - not_null
+      - name: encounter_count
+        tests:
+          - not_null
+      - name: medical_claim_count
+        tests:
+          - not_null
+      - name: pharmacy_claim_count
+        tests:
+          - not_null
+      - name: active_prescription_count
+        tests:
+          - not_null
+      - name: pharmacy_info_match_count
+        description: >
+          Usually 0 or 1. >1 means more than one pharmacy_info record auto-matched to this
+          person -- a real precision limit of match-path resolution, surfaced rather than
+          hidden (see member_360.sql).
+        tests:
+          - not_null
+      - name: lab_result_count
+        tests:
+          - not_null
+      - name: abnormal_lab_count
+        tests:
           - not_null
 
   - name: agg_dedup_metrics
