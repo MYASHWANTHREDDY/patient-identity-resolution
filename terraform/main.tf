@@ -48,7 +48,7 @@ resource "google_bigquery_dataset" "matching" {
 # production system would scope these to the bucket/dataset level.
 resource "google_service_account" "pipeline" {
   account_id   = "mdm-pipeline"
-  display_name = "patient-dedup-system pipeline"
+  display_name = "patient-identity-resolution pipeline"
 }
 
 resource "google_project_iam_member" "pipeline_bigquery" {

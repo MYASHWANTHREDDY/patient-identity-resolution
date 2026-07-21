@@ -1,4 +1,4 @@
-# patient-dedup-system
+# patient-identity-resolution
 
 **Status:** Phases 0–23 complete. A shippable local build (dbt conformance/blocking,
 Fellegi-Sunter scoring, clustering/crosswalk/survivorship, quality gates, Streamlit dashboard,

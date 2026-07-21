@@ -61,7 +61,7 @@ _DOMAIN_LABELS = {
     "lab_results": "Lab results",
 }
 
-st.set_page_config(page_title="patient-dedup-system", layout="wide", page_icon="🧬")
+st.set_page_config(page_title="patient-identity-resolution", layout="wide", page_icon="🧬")
 
 
 def _inject_css() -> None:
@@ -228,7 +228,7 @@ def main() -> None:
     with st.sidebar:
         st.markdown(
             '<div class="app-brand"><span class="mark">◆</span>'
-            '<span class="name">patient-dedup-system</span></div>'
+            '<span class="name">patient-identity-resolution</span></div>'
             '<div class="app-sub">Multi-vendor patient MDM — probabilistic record linkage, '
             "six data domains, one patient_global_id.</div>",
             unsafe_allow_html=True,
