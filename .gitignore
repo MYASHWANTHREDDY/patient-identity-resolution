@@ -16,7 +16,11 @@ venv/
 *.key.json
 service-account*.json
 
-# Generated data — the seeded generator is the artifact, not its output (P3, anti-patterns)
+# Generated data — the seeded generator is the artifact, not its output (P3, anti-patterns).
+# One deliberate exception: data/dev/mdm.duckdb is force-added (`git add -f`) despite this
+# rule, so the hosted Streamlit Cloud demo has something to read -- a static host has no
+# compute to run the pipeline itself. Local development is unaffected; this file is just an
+# explicitly-tracked exception, not a change to the rule.
 data/
 *.parquet
 *.duckdb

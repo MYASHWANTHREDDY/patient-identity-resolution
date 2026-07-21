@@ -21,6 +21,19 @@ VALID_TIERS = ("ci", "dev", "scale")
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 _REQUIRED_TIER_KEYS = {"num_identities", "target_records", "backend", "dbt_target"}
 
+# {domain name} -> {serving.fct_* table} -- domain names match Phase 17-20's
+# docs/domain-linking-strategy.md vocabulary, not the underlying table names, so a caller
+# never has to know a table even exists. Lives here (not mdm.api) so mdm.api's FastAPI/
+# pydantic dependency isn't dragged into callers -- like the dashboard -- that only need
+# the domain->table mapping, not the API itself.
+DOMAIN_TABLES = {
+    "medical_history": "fct_medical_history",
+    "medical_claims": "fct_medical_claims",
+    "pharmacy_claims": "fct_pharmacy_claims",
+    "pharmacy_info": "fct_pharmacy_info",
+    "lab_results": "fct_lab_results",
+}
+
 
 class ConfigError(ValueError):
     """Raised when config/matching.yml is missing, malformed, or fails validation."""

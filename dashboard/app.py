@@ -31,8 +31,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from mdm.api import DOMAIN_TABLES  # noqa: E402
-from mdm.config import VALID_TIERS, load_config  # noqa: E402
+from mdm.config import DOMAIN_TABLES, VALID_TIERS, load_config  # noqa: E402
 
 # ---------------------------------------------------------------------------------------
 # Design tokens -- kept in one place so chart chrome, table badges, and injected CSS never

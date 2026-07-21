@@ -22,19 +22,9 @@ import duckdb
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
-from mdm.config import REPO_ROOT, VALID_TIERS
+from mdm.config import DOMAIN_TABLES, REPO_ROOT, VALID_TIERS
 from mdm.pipeline import resolve_new_record
 
-# {domain name in the API} -> {serving.fct_* table} -- domain names match Phase 17-20's
-# docs/domain-linking-strategy.md vocabulary, not the underlying table names, so a caller
-# never has to know a table even exists.
-DOMAIN_TABLES = {
-    "medical_history": "fct_medical_history",
-    "medical_claims": "fct_medical_claims",
-    "pharmacy_claims": "fct_pharmacy_claims",
-    "pharmacy_info": "fct_pharmacy_info",
-    "lab_results": "fct_lab_results",
-}
 DEFAULT_PROFILE_DOMAIN_LIMIT = 20
 DEFAULT_DRILLDOWN_LIMIT = 50
 

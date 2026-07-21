@@ -1,0 +1,9 @@
+# Streamlit Community Cloud looks for a requirements.txt in the same directory as the app
+# entrypoint before falling back to the repo root -- this one exists so the hosted demo
+# doesn't have to install pyspark/dbt-core/dbt-bigquery (needed by the full local pipeline,
+# not by the dashboard, which only ever reads an already-built DuckDB file). Versions match
+# the root requirements.txt; update both together.
+PyYAML==6.0.2
+duckdb==1.5.4
+pandas==3.0.3
+streamlit==1.59.2
