@@ -73,7 +73,7 @@ about 90 seconds end to end. Swap `TIER=ci` for a ~5,000-record run in a few sec
 of the `dev` tier's 50,000.
 
 **No `make` on Windows.** Git Bash doesn't ship GNU Make. Either install it (`choco install
-make`, or use WSL), or run the Makefile's `demo` target by hand — it's `data-dev`,
+make`, or use WSL), or run the Makefile's `demo` target by hand — it's `data`,
 `dbt-build-pre`, `estimate-params`, `match`, `match-path`, `dbt-build`, `evaluate`,
 `quality-checks`, `dashboard` in that order; see the `Makefile` for the exact command each one
 runs.

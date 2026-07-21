@@ -68,8 +68,8 @@ being trusted against real, billed compute.
 
 Five submission attempts were needed to get a correct, efficiently-configured result --
 each one, and its real cost, below (`gcloud dataproc batches describe ... runtimeInfo.
-approximateUsage`, converted at ~$0.060/DCU-hour + ~$0.011/GB-hour, this session's
-calibrated rates):
+approximateUsage`, converted at ~$0.060/DCU-hour + ~$0.011/GB-hour, the calibrated
+Dataproc Serverless rates in effect for this run):
 
 | Attempt | Issue | Runtime | Cost |
 | --- | --- | --- | --- |
