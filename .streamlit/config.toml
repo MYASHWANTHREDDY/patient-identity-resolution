@@ -1,0 +1,14 @@
+# Dashboard theme (Phase 23+ polish). A deliberate dark, analytics-tool identity --
+# gold accent ties to "golden record", the actual domain term this whole project is
+# built around, not a generic Streamlit default. Data-series colors (charts) are chosen
+# and validated separately in dashboard/app.py -- this file only sets UI chrome.
+[theme]
+base = "dark"
+primaryColor = "#d9a93d"
+backgroundColor = "#0d1119"
+secondaryBackgroundColor = "#141a26"
+textColor = "#e7eaf2"
+font = "sans serif"
+
+[server]
+headless = true

@@ -383,19 +383,49 @@ def plot_pr_curve(fs_curve: pd.DataFrame, naive_curve: pd.DataFrame, out_path: P
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    # Colors match the dashboard's dark theme (dashboard/app.py) so this PNG doesn't clash
+    # when embedded there. GOLD/BLUE are the categorical pair validated with
+    # scripts/validate_palette.js against this dashboard's actual card surface (#141a26) --
+    # not picked by eye. GOLD is the primary series (Fellegi-Sunter, this project's own
+    # scorer); BLUE is the comparison baseline (naive), matching dataviz skill convention.
+    surface = "#141a26"
+    border = "#262e42"
+    text = "#e7eaf2"
+    text_muted = "#9aa3ba"
+    gold = "#b8860a"
+    blue = "#3987e5"
+
     fig, ax = plt.subplots(figsize=(6, 5))
-    ax.plot(fs_curve["recall"], fs_curve["precision"], label="Fellegi-Sunter", color="#1f77b4")
-    ax.plot(naive_curve["recall"], naive_curve["precision"], label="Naive", color="#ff7f0e")
-    ax.set_xlabel("Recall")
-    ax.set_ylabel("Precision")
-    ax.set_title("Precision-Recall: Fellegi-Sunter vs. naive scorer")
+    fig.patch.set_facecolor(surface)
+    ax.set_facecolor(surface)
+
+    # Naive drawn first so the primary Fellegi-Sunter line renders on top where the two
+    # curves overlap, instead of being hidden underneath.
+    ax.plot(
+        naive_curve["recall"], naive_curve["precision"], label="Naive", color=blue, linewidth=2.2
+    )
+    ax.plot(
+        fs_curve["recall"],
+        fs_curve["precision"],
+        label="Fellegi-Sunter",
+        color=gold,
+        linewidth=2.2,
+    )
+    ax.set_xlabel("Recall", color=text_muted)
+    ax.set_ylabel("Precision", color=text_muted)
+    ax.set_title("Precision-Recall: Fellegi-Sunter vs. naive scorer", color=text)
     ax.set_xlim(0, 1.02)
     ax.set_ylim(0, 1.02)
-    ax.legend(loc="lower left")
-    ax.grid(alpha=0.3)
+    legend = ax.legend(loc="lower left", facecolor=surface, edgecolor=border)
+    for label in legend.get_texts():
+        label.set_color(text)
+    ax.grid(alpha=0.35, color=border)
+    ax.tick_params(colors=text_muted)
+    for spine in ax.spines.values():
+        spine.set_color(border)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=surface)
     plt.close(fig)
 
 
