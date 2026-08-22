@@ -24,13 +24,18 @@ DBT_PROJECT_DIR = REPO_ROOT / "dbt"
 GENERATE_SCRIPT = REPO_ROOT / "scripts" / "generate.py"
 
 
+# Console scripts land in .venv/Scripts/*.exe on Windows but .venv/bin/* on POSIX. Checking
+# only the Windows layout skipped every dbt-backed test in this file on Linux whenever the
+# venv wasn't already on PATH -- a green run that had actually executed nothing.
+_VENV_DBT = REPO_ROOT / ".venv" / ("Scripts/dbt.exe" if os.name == "nt" else "bin/dbt")
+
+
 def _dbt_available() -> bool:
-    return shutil.which("dbt") is not None or (REPO_ROOT / ".venv" / "Scripts" / "dbt.exe").exists()
+    return shutil.which("dbt") is not None or _VENV_DBT.exists()
 
 
 def _dbt_executable() -> str:
-    venv_dbt = REPO_ROOT / ".venv" / "Scripts" / "dbt.exe"
-    return str(venv_dbt) if venv_dbt.exists() else "dbt"
+    return str(_VENV_DBT) if _VENV_DBT.exists() else "dbt"
 
 
 def _dbt_build(db_path: Path, profiles_dir: Path, *, exclude_serving: bool) -> None:
