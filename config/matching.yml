@@ -34,19 +34,40 @@ scoring:  # Phase 6
 # review band collapses to zero-width here. See docs/design-decisions.md. Re-run the
 # sweep and update these if fs_params.yml or the noise model changes.
 #
-# dev/ci tier ONLY -- mdm.pipeline.run_matching (local DuckDB) reads this directly via
-# load_thresholds(). Does NOT transfer to the scale tier: the same FS score corresponds to
-# a much lower precision at 5M records than at 50K (Phase 14 finding, see
-# docs/design-decisions.md) -- the population of records that coincidentally agree on
-# bp_coarse's key (last_name_phonetic + gender + dob_year) grows much faster than the
-# population of true duplicates as record count grows, so a fixed score level gets
-# reached by many more non-matches at scale. spark_jobs/cluster_identities.py's
-# --upper-threshold is a separately-measured, scale-appropriate value (currently 20.5,
-# see Makefile's dataproc-cluster-identities target and design-decisions.md) -- not this
-# value. Re-derive both independently whenever fs_params.yml changes.
+# Keyed by tier, because the threshold is a property of the population, not of the scorer:
+# the same FS score corresponds to a much lower precision at 5M records than at 50K (Phase
+# 14 finding) -- the population of records that coincidentally agree on bp_coarse's key
+# (last_name_phonetic + gender + dob_year) grows much faster than the population of true
+# duplicates as record count grows, so a fixed score level gets reached by many more
+# non-matches at scale. Re-derive per tier whenever fs_params.yml or the noise model
+# changes; load_thresholds(tier) raises on an unknown tier rather than defaulting, so a
+# missing entry fails loudly instead of silently borrowing another tier's cutoff.
 thresholds:  # Phase 6
-  upper: 9.5203
-  lower: 9.5203
+  ci:
+    # Deliberately dev's measured values, NOT a ci-specific sweep. ci is a 5,050-record
+    # smoke tier, not a measurement tier: `python -m mdm.evaluate --tier ci` does produce
+    # its own cutoff (1.7929), but that only satisfies threshold_sweep's 0.99 precision
+    # target on *core* member matching, and the same threshold is reused for match-path
+    # resolution against a different candidate population. At 1.7929 two distinct people
+    # merged into one patient_global_id -- caught by test_member_360_domain_counts_match_
+    # fact_tables, which reconciles member_360's plan-tier count against fct_pharmacy_info
+    # (a member-level file: one record per person, so a collision there is a false merge).
+    # A false merge is a safety incident; a low recall figure on a smoke tier is not.
+    upper: 9.5203
+    lower: 9.5203
+  dev:
+    upper: 9.5203   # measured, dev tier (50,482 records)
+    lower: 9.5203
+  scale:
+    upper: 20.5     # measured, scale tier (5,048,389 records) -- docs/scale-run.md
+    # NOT independently measured. Held equal to `upper` deliberately: while this file
+    # carried one global pair, the scale tier auto-matched at 20.5 (passed to
+    # spark_jobs/cluster_identities.py) but built its review queue from the dev band
+    # [9.5203, 9.5203) -- so every pair scoring 9.5203-20.5 was neither auto-matched nor
+    # routed to review, and was silently dropped as a non-match. A zero-width band drops
+    # nothing silently, which is the honest state until a real scale-tier `lower` is
+    # derived from a threshold_sweep against the 5M ground truth.
+    lower: 20.5
 
 clustering:  # Phase 7
   max_cluster_size: 6

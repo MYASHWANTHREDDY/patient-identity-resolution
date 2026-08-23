@@ -102,7 +102,7 @@ def test_run_matching_is_idempotent(tmp_path):
     db_path, fs_params, nickname_index = _build_ci_tier_db(tmp_path)
 
     summary_1 = run_matching(
-        str(db_path), run_id="run1", fs_params=fs_params, nickname_index=nickname_index
+        str(db_path), tier="ci", run_id="run1", fs_params=fs_params, nickname_index=nickname_index
     )
 
     con = duckdb.connect(str(db_path), read_only=True)
@@ -119,7 +119,7 @@ def test_run_matching_is_idempotent(tmp_path):
     assert events_after_run1 == summary_1["num_identity_events"] > 0
 
     summary_2 = run_matching(
-        str(db_path), run_id="run2", fs_params=fs_params, nickname_index=nickname_index
+        str(db_path), tier="ci", run_id="run2", fs_params=fs_params, nickname_index=nickname_index
     )
 
     con = duckdb.connect(str(db_path), read_only=True)
@@ -146,7 +146,9 @@ def test_run_matching_is_idempotent(tmp_path):
 @pytest.mark.skipif(not _dbt_available(), reason="dbt not installed")
 def test_run_matching_every_field_has_lineage(tmp_path):
     db_path, fs_params, nickname_index = _build_ci_tier_db(tmp_path)
-    run_matching(str(db_path), run_id="run1", fs_params=fs_params, nickname_index=nickname_index)
+    run_matching(
+        str(db_path), tier="ci", run_id="run1", fs_params=fs_params, nickname_index=nickname_index
+    )
 
     con = duckdb.connect(str(db_path), read_only=True)
     pgid_count = con.execute("SELECT count(*) FROM serving.member_demographics").fetchone()[0]
@@ -172,7 +174,9 @@ def test_run_matching_every_field_has_lineage(tmp_path):
 @pytest.mark.skipif(not _dbt_available(), reason="dbt not installed")
 def test_run_matching_never_produces_a_cluster_over_the_size_guard(tmp_path):
     db_path, fs_params, nickname_index = _build_ci_tier_db(tmp_path)
-    run_matching(str(db_path), run_id="run1", fs_params=fs_params, nickname_index=nickname_index)
+    run_matching(
+        str(db_path), tier="ci", run_id="run1", fs_params=fs_params, nickname_index=nickname_index
+    )
 
     from mdm.config import load_config
 

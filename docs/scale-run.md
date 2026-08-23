@@ -190,7 +190,7 @@ tier:
 | Identity events (all CREATE -- first-ever resolution) | 2,559,287 |
 | dbt `serving` models | 3/3 (agg_dedup_metrics, dim_member, member_360) |
 | dbt snapshot | 2.6M rows merged, 270.7 MiB scanned |
-| Quality gates | 5/5 pass (dedup_rate=0.493, review_queue_rate=0.0, largest block share <0.01%, 0 implausible DOBs, largest *merged* cluster 6 members) |
+| Quality gates | 5/5 pass (dedup_rate=0.493, review_queue_rate=0.0 [**see correction below**], largest block share <0.01%, 0 implausible DOBs, largest *merged* cluster 6 members) |
 
 `cluster_size_distribution`'s "largest cluster has 6 members" (not 45, the largest raw
 cluster from the Dataproc clustering step) confirms the flagged-cluster guard works
@@ -199,6 +199,50 @@ its members became its own singleton golden record instead -- exactly the P13 "w
 uncertain, do not merge" design, verified against real 5M-scale output. Golden-record count
 reconciles exactly: 2,219,542 from clean (unflagged) clusters, plus 216,486 untouched
 singletons, plus 123,259 individual members of flagged clusters, totals 2,559,287.
+
+## Correction (2026-08-23): `review_queue_rate=0.0` was a defect, not a result
+
+The `review_queue_rate=0.0` reported above is left as written -- it is what the run
+produced -- but it did **not** mean "nothing needed review at 5M records". It meant the
+review band was structurally empty, and the pairs that should have populated it were
+silently discarded.
+
+`config/matching.yml` carried a single global `thresholds` pair, `upper = lower = 9.5203`,
+measured at dev tier. The scale run's auto-match decision did not use it: the correct,
+separately-measured scale cutoff of 20.5 was passed straight to
+`spark_jobs/cluster_identities.py` as `--upper-threshold` from the Makefile and the Airflow
+DAG. But `scripts/run_matching_bigquery.py` -- which builds `serving.review_queue` -- read
+the config values, and had no `--tier` flag to tell it otherwise. Its query was therefore:
+
+```sql
+WHERE score >= 9.5203 AND score < 9.5203   -- always empty
+```
+
+So at the scale tier every pair scored between **9.5203 and 20.5** was neither auto-matched
+(below the 20.5 clustering cutoff) nor routed to review (the band was empty). Those pairs --
+precisely the uncertain middle the two-threshold design exists to protect -- were classified
+`non_match` and dropped without a record. In safety terms the direction is the favourable
+one (false splits, not false merges), but the review mechanism this project describes as
+non-negotiable was inert at the tier it was showcased on.
+
+**Why it stayed hidden:** an empty review band is a *documented, legitimate* outcome at dev
+tier (see design-decisions.md, "a zero-width review band is a legitimate outcome when a
+scorer separates classes cleanly"). That reasoning is sound where `upper == lower` and the
+auto-match line is the same value -- no gap can exist. It stops being sound once the
+auto-match line moves to 20.5 and the band does not move with it. The same observation,
+`review_queue_rate=0.0`, means opposite things in the two cases, and the existing
+documentation made the broken one read as expected.
+
+**Fixed by** keying `thresholds` per tier in `config/matching.yml`, requiring a `tier`
+argument in `load_thresholds()` (no default -- an unknown tier raises rather than borrowing
+another tier's cutoff), adding `--tier` to both BigQuery scripts, and moving the 20.5 out of
+the Makefile and the DAG into config so a single source of truth feeds every consumer.
+
+**Still open:** the scale tier's `lower` has never been independently measured. It is
+currently held equal to `upper` (20.5), which makes the band zero-width and drops nothing
+silently -- honest, but not the same as derived. A real value needs `threshold_sweep` run
+against the 5M ground truth. The numbers above were not re-measured after this fix; a
+re-run would be needed to report a non-zero `review_queue_rate`.
 
 ## Cost summary
 
@@ -243,3 +287,9 @@ bug -- both were diagnosed and fixed entirely locally and via on-demand BigQuery
    do** -- a dev-tier verification run and a scale-tier real run left overlapping
    record_keys (both start `identity_index` at 0), and stale serving-layer state from the
    former silently corrupted 0.73% of the latter until the tables were cleared.
+7. **One config key held a per-tier quantity** -- `thresholds` was a single global pair, so
+   the scale tier auto-matched at its own measured 20.5 while building its review queue from
+   dev's 9.5203, and everything scoring in between was silently dropped. Found 2026-08-23,
+   after this run; see the correction section above. The tell was `review_queue_rate=0.0`
+   passing as a quality gate -- a metric that looks like good news is worth confirming
+   *means* what it looks like.

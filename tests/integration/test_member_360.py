@@ -94,8 +94,12 @@ def _build_fully_matched_ci_tier_db(tmp_path: Path) -> Path:
         records_by_key, true_pairs, sample_size=2000, seed=42, nickname_index=nickname_index
     )
 
-    run_matching(str(db_path), run_id="run1", fs_params=fs_params, nickname_index=nickname_index)
-    run_matchpath_matching(str(db_path), fs_params=fs_params, nickname_index=nickname_index)
+    run_matching(
+        str(db_path), tier="ci", run_id="run1", fs_params=fs_params, nickname_index=nickname_index
+    )
+    run_matchpath_matching(
+        str(db_path), tier="ci", fs_params=fs_params, nickname_index=nickname_index
+    )
 
     _dbt_build(db_path, profiles_dir, exclude_serving=False)
     return db_path

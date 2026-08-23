@@ -33,6 +33,7 @@ from mdm.backends.bigquery import (
     write_serving_batch,
 )
 from mdm.clustering import Cluster, finalize_cluster_membership
+from mdm.config import VALID_TIERS
 from mdm.crosswalk import resolve_crosswalk
 from mdm.pipeline import (
     build_serving_tables,
@@ -80,12 +81,16 @@ def _pgid_batches(members_by_pgid: dict[str, list[str]], batch_size: int):
 
 
 def run_matching_bigquery(
-    project: str, *, run_id: str | None = None, batch_size: int = DEFAULT_BATCH_SIZE
+    project: str,
+    *,
+    tier: str = "scale",
+    run_id: str | None = None,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> dict:
     from google.cloud import bigquery
 
     run_id = run_id or datetime.now(UTC).isoformat()
-    thresholds = load_thresholds()
+    thresholds = load_thresholds(tier)
     client = bigquery.Client(project=project)
 
     # Kept as a DataFrame, never converted to a dict-of-dicts for all rows at once (see
@@ -165,6 +170,10 @@ def run_matching_bigquery(
 def main(argv: list[str] | None = None) -> dict:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", required=True)
+    # This path only ever runs against BigQuery, i.e. the scale tier -- but it is stated
+    # explicitly rather than assumed, because load_thresholds() no longer has a default
+    # and reading another tier's cutoff here is precisely the bug this flag prevents.
+    parser.add_argument("--tier", choices=VALID_TIERS, default="scale")
     parser.add_argument("--run-id", type=str, default=None)
     parser.add_argument(
         "--batch-size",
@@ -176,7 +185,9 @@ def main(argv: list[str] | None = None) -> dict:
     )
     args = parser.parse_args(argv)
 
-    summary = run_matching_bigquery(args.project, run_id=args.run_id, batch_size=args.batch_size)
+    summary = run_matching_bigquery(
+        args.project, tier=args.tier, run_id=args.run_id, batch_size=args.batch_size
+    )
 
     print(
         f"project={args.project} run_id={summary['run_id']} records={summary['num_records']} "

@@ -55,9 +55,13 @@ def _rows_as_dicts(con: duckdb.DuckDBPyConnection, query: str, params: list) -> 
     return [dict(zip(columns, row, strict=False)) for row in cursor.fetchall()]
 
 
-def create_app(db_path: Path) -> FastAPI:
+def create_app(db_path: Path, *, tier: str = "dev") -> FastAPI:
     """Factory, not a module-level app instance -- tests point this at a temporary
-    per-test database rather than sharing one global app/connection across the suite."""
+    per-test database rather than sharing one global app/connection across the suite.
+
+    `tier` selects the triage thresholds /resolve scores against (load_thresholds no
+    longer defaults) -- it must match the tier `db_path` was built at, or the write path
+    auto-matches on another population's cutoff."""
     app = FastAPI(
         title="Member 360 API",
         description=(
@@ -78,7 +82,7 @@ def create_app(db_path: Path) -> FastAPI:
     @app.post("/resolve", response_model=ResolveResponse)
     def resolve(record: MemberRecordIn) -> ResolveResponse:
         try:
-            result = resolve_new_record(str(db_path), record.model_dump())
+            result = resolve_new_record(str(db_path), record.model_dump(), tier=tier)
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return ResolveResponse(**result)
@@ -166,7 +170,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     db_path = args.db_path or (REPO_ROOT / "data" / args.tier / "mdm.duckdb")
-    app = create_app(db_path)
+    app = create_app(db_path, tier=args.tier)
     uvicorn.run(app, host=args.host, port=args.port)
 
 

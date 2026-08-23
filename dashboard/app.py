@@ -270,7 +270,7 @@ def main() -> None:
     with tabs["Golden records"]:
         _render_golden_records(db_path)
     with tabs["Methodology"]:
-        _render_methodology()
+        _render_methodology(tier)
     with tabs["Quality history"]:
         _render_quality_history(db_path)
 
@@ -530,7 +530,7 @@ def _render_member_detail(db_path: str, patient_global_id: str) -> None:
                 st.dataframe(domain_df, width="stretch", hide_index=True)
 
 
-def _render_methodology() -> None:
+def _render_methodology(tier: str) -> None:
     config = load_config()
 
     col1, col2 = st.columns(2)
@@ -552,11 +552,14 @@ def _render_methodology() -> None:
 
     with col2:
         with st.container(border=True):
-            st.markdown("**Triage thresholds**")
+            # Per tier -- the same FS score means a different thing at 5K, 50K and 5M
+            # records, so config/matching.yml keys these by tier (see its comment there).
+            tier_thresholds = config["thresholds"][tier]
+            st.markdown(f"**Triage thresholds** — `{tier}` tier")
             _kpi_row(
                 [
-                    (f"{config['thresholds']['upper']:.4f}", "Upper (auto-match)", True),
-                    (f"{config['thresholds']['lower']:.4f}", "Lower (review floor)", False),
+                    (f"{tier_thresholds['upper']:.4f}", "Upper (auto-match)", True),
+                    (f"{tier_thresholds['lower']:.4f}", "Lower (review floor)", False),
                 ]
             )
 

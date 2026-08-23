@@ -100,12 +100,16 @@ def test_snapshot_captures_a_changed_golden_record(tmp_path):
     fs_params = estimate_fs_params(
         records_by_key, true_pairs, sample_size=2000, seed=42, nickname_index=nickname_index
     )
-    run_matching(str(db_path), run_id="run1", fs_params=fs_params, nickname_index=nickname_index)
+    run_matching(
+        str(db_path), tier="ci", run_id="run1", fs_params=fs_params, nickname_index=nickname_index
+    )
     # Phase 20: serving.fct_pharmacy_info/fct_lab_results (and their source tests) need
     # serving.matchpath_resolution to exist before the full dbt build below -- written by
     # run_matchpath_matching, a separate step from core run_matching
     # (docs/domain-linking-strategy.md).
-    run_matchpath_matching(str(db_path), fs_params=fs_params, nickname_index=nickname_index)
+    run_matchpath_matching(
+        str(db_path), tier="ci", fs_params=fs_params, nickname_index=nickname_index
+    )
 
     first_build = _dbt_build(profiles_dir, db_path)
     assert first_build.returncode == 0, first_build.stdout + first_build.stderr

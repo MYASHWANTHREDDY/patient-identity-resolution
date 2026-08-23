@@ -23,6 +23,7 @@ from mdm.backends.bigquery import (
     read_existing_crosswalk,
     write_matchpath_tables,
 )
+from mdm.config import VALID_TIERS
 from mdm.pipeline import load_fs_params, load_nickname_index, load_thresholds
 
 # record_key prefix -> domain name, the BigQuery-script equivalent of the domain tracking
@@ -50,6 +51,7 @@ def domain_for_record_key(record_key: str) -> str:
 def run_matchpath_matching_bigquery(
     project: str,
     *,
+    tier: str = "scale",
     fs_params: dict | None = None,
     nickname_index: dict[str, str] | None = None,
 ) -> dict:
@@ -57,7 +59,7 @@ def run_matchpath_matching_bigquery(
 
     fs_params = fs_params if fs_params is not None else load_fs_params()
     nickname_index = nickname_index if nickname_index is not None else load_nickname_index()
-    thresholds = load_thresholds()
+    thresholds = load_thresholds(tier)
     client = bigquery.Client(project=project)
 
     existing_crosswalk = read_existing_crosswalk(client, project)
@@ -116,9 +118,12 @@ def run_matchpath_matching_bigquery(
 def main(argv: list[str] | None = None) -> dict:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", required=True)
+    # See run_matching_bigquery.py: stated, not assumed, now that load_thresholds()
+    # requires a tier.
+    parser.add_argument("--tier", choices=VALID_TIERS, default="scale")
     args = parser.parse_args(argv)
 
-    summary = run_matchpath_matching_bigquery(args.project)
+    summary = run_matchpath_matching_bigquery(args.project, tier=args.tier)
 
     print(
         f"project={args.project} auto_matched={summary['num_auto_matched']} "

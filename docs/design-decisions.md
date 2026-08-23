@@ -321,6 +321,12 @@ classes cleanly on the candidate-pair population — not evidence of a bug by it
 `upper` vs `lower` before assuming something's wrong; they should differ only when there's a
 genuine reachable middle ground between the two targets.
 
+> **Later qualification (2026-08-23):** this holds only while `upper` is also the cutoff the
+> auto-match decision actually uses. At the scale tier it wasn't -- clustering ran at 20.5
+> while the band came from this file's 9.5203 -- and the same "zero-width is fine" reasoning
+> then hid an 11-point gap where pairs were silently dropped. See "Thresholds were a single
+> global pair for a per-tier quantity" below.
+
 ## Fellegi-Sunter and the naive scorer land within 0.0001 F1 of each other
 
 **Phase:** 6
@@ -965,6 +971,11 @@ a `gs://` path, since gcloud submits whatever is already staged, silently.
 dev/ci-tier only. The scale tier gets its own, separately-measured threshold, passed
 explicitly to `spark_jobs/cluster_identities.py --upper-threshold` (currently `20.5`) from
 `Makefile` and `airflow/dags/dedup_dag.py` -- not read from `matching.yml`.
+
+> **Superseded 2026-08-23 as to *where* the value lives** (the finding itself stands): the
+> scale threshold is now `thresholds.scale.upper` in `config/matching.yml`, read by the
+> Makefile and the DAG rather than hardcoded in each. Keeping it outside config is what let
+> the review queue keep reading dev's band at scale -- see the entry below.
 **What was found:** Before submitting the (re-tuned) clustering job, the already-computed
 `matching.pair_scores` (327,366,916 rows, scale tier) were checked directly against real
 scale-tier ground truth (`data/scale/ground_truth`, joined into BigQuery as a scratch table)
@@ -1415,3 +1426,44 @@ across the run rather than row data. Peak memory is now one shard's worth of row
 total. Verified via the existing generator determinism/worker-independence tests (all still
 pass -- output layout and content are unchanged, only *when* each shard gets written) and
 a direct dev-tier byte-comparison against the pre-refactor code path.
+
+## Thresholds were a single global pair for a per-tier quantity, and the scale tier silently dropped its review band
+
+**Phase:** post-23, found 2026-08-23 while investigating an unrelated ci-tier recall figure
+**What was found:** `config/matching.yml` declared one global `thresholds: {upper, lower}`,
+both `9.5203` (dev-measured). But the threshold is a property of the *population*, not the
+scorer -- Phase 14 established that and set the scale tier's cutoff to `20.5`. That value
+lived in `Makefile` and `airflow/dags/dedup_dag.py` as a `--upper-threshold` CLI argument,
+not in config. So at the scale tier two different consumers read two different numbers:
+`spark_jobs/cluster_identities.py` auto-matched at 20.5, while
+`scripts/run_matching_bigquery.py` -- which builds `serving.review_queue`, and had no
+`--tier` flag -- queried `WHERE score >= 9.5203 AND score < 9.5203`, an always-empty band.
+Every pair scoring between 9.5203 and 20.5 was therefore neither auto-matched nor reviewed:
+classified `non_match` and dropped with no record. The direction is safety-favourable (false
+splits, not false merges) but the two-threshold triage design was inert at scale.
+**Why it went unseen:** `docs/scale-run.md` reported `review_queue_rate=0.0` as a *passing*
+quality gate, and a zero-width review band was already documented above as a legitimate dev-
+tier outcome. A correct decision at one tier became camouflage for a defect at another. A
+metric that reads as good news deserves confirming it means what it appears to.
+**Decision:** `thresholds` is keyed by tier (`ci`/`dev`/`scale`); `load_thresholds(tier)`
+takes a required `tier` with no default, so an unknown tier raises rather than borrowing
+another tier's cutoff; both BigQuery scripts gained `--tier`; and `20.5` moved out of the
+Makefile and DAG into config, which now feeds every consumer (P5).
+**On the `ci` entry:** it deliberately holds dev's 9.5203 rather than a ci-specific sweep.
+`python -m mdm.evaluate --tier ci` does produce one (1.7929), but `threshold_sweep`'s 0.99
+precision target is set on *core* member matching while the same cutoff is reused for
+match-path resolution against a different candidate population. At 1.7929 two distinct people
+merged into one `patient_global_id`, caught by
+`test_member_360_domain_counts_match_fact_tables` reconciling `member_360`'s plan-tier count
+against `fct_pharmacy_info` (a member-level file: one record per person, so a collision is a
+false merge). A false merge is a safety incident; a low recall number on a 5,050-record smoke
+tier is not.
+**Still open:** the scale tier's `lower` has never been independently measured. It is held
+equal to `upper` so the band is zero-width and nothing is dropped silently -- honest, but
+derived is better. It needs `threshold_sweep` against the 5M ground truth, which means a real
+Dataproc/BigQuery run.
+**How to apply:** when a config key holds a value that varies along a dimension the system
+already models (here, tier), key it by that dimension rather than documenting the exception in
+a comment. The comment version had been correct and prominently placed for two phases; it
+still produced two consumers reading different numbers, because a comment cannot be read by
+`run_matching_bigquery.py`.

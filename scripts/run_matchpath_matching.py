@@ -25,7 +25,7 @@ def main(argv: list[str] | None = None) -> dict:
     args = parser.parse_args(argv)
 
     db_path = args.db_path or (REPO_ROOT / "data" / args.tier / "mdm.duckdb")
-    summary = run_matchpath_matching(str(db_path))
+    summary = run_matchpath_matching(str(db_path), tier=args.tier)
 
     print(
         f"tier={args.tier} matchpath_records={summary['num_matchpath_records']} "

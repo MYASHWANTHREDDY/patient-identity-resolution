@@ -3,6 +3,11 @@
 TIER ?= dev
 SEED ?= 42
 
+# config/matching.yml owns every tier's cutoff (thresholds.<tier>.upper). Read here
+# rather than duplicated, so the scale-tier value can't drift from the one the local
+# and BigQuery paths use -- P5, one source of truth for anything tunable.
+SCALE_UPPER ?= $(shell python -c "import yaml;print(yaml.safe_load(open('config/matching.yml'))['thresholds']['scale']['upper'])")
+
 install:
 	pip install -r requirements.txt
 
@@ -141,11 +146,11 @@ dataproc-score-matchpath-pairs: upload-spark-deps
 		--patient-normalized-table conformance.patient_normalized_with_matchpath \
 		--output-table matching.matchpath_pair_scores
 
-# --upper-threshold is 20.5, NOT config/matching.yml's 9.0413 (that value is dev/ci-tier
-# only -- see the comment there): measured directly against real scale-tier ground truth
-# (Phase 14, docs/design-decisions.md), the same FS score is far less precise at 5M records
-# than at 50K, so the auto-match cutoff has to move up to hold precision. Re-measure this
-# whenever fs_params.yml changes.
+# --upper-threshold comes from config/matching.yml's thresholds.scale.upper via
+# $(SCALE_UPPER) above -- measured directly against real scale-tier ground truth (Phase 14,
+# docs/design-decisions.md), where the same FS score is far less precise at 5M records than
+# at 50K, so the auto-match cutoff has to move up to hold precision. Re-measure it whenever
+# fs_params.yml changes, and change it in config -- not here.
 dataproc-cluster-identities: upload-spark-deps
 	gcloud dataproc batches submit pyspark gs://$(BUCKET)/dependencies/cluster_identities.py \
 		--project=$(PROJECT) --region=us-central1 \
@@ -155,7 +160,7 @@ dataproc-cluster-identities: upload-spark-deps
 		-- --project $(PROJECT) \
 		--checkpoint-dir gs://$(BUCKET)/checkpoints/cluster-identities \
 		--shuffle-partitions 32 --max-executors 7 \
-		--upper-threshold 20.5 --max-cluster-size 6 --min-cluster-density 0.6
+		--upper-threshold $(SCALE_UPPER) --max-cluster-size 6 --min-cluster-density 0.6
 
 # Phase 13: crosswalk/survivorship and quality checks against BigQuery-resident Dataproc
 # output (mdm.pipeline's DuckDB logic, reused unchanged -- see docs/design-decisions.md).

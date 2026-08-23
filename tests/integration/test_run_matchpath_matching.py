@@ -98,8 +98,12 @@ def _build_ci_tier_db_with_matchpath_resolution(tmp_path: Path) -> Path:
         records_by_key, true_pairs, sample_size=2000, seed=42, nickname_index=nickname_index
     )
 
-    run_matching(str(db_path), run_id="run1", fs_params=fs_params, nickname_index=nickname_index)
-    run_matchpath_matching(str(db_path), fs_params=fs_params, nickname_index=nickname_index)
+    run_matching(
+        str(db_path), tier="ci", run_id="run1", fs_params=fs_params, nickname_index=nickname_index
+    )
+    run_matchpath_matching(
+        str(db_path), tier="ci", fs_params=fs_params, nickname_index=nickname_index
+    )
 
     _dbt_build(db_path, profiles_dir, exclude_serving=False)
     return db_path
@@ -168,7 +172,7 @@ def test_run_matchpath_matching_requires_core_crosswalk_first(tmp_path):
     db_path = _generate_and_load(tmp_path)
 
     with pytest.raises(RuntimeError, match="serving.crosswalk"):
-        run_matchpath_matching(str(db_path))
+        run_matchpath_matching(str(db_path), tier="ci")
 
 
 @pytest.mark.skipif(not _dbt_available(), reason="dbt not installed")

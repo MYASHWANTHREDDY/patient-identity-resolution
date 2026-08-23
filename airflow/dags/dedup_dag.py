@@ -29,6 +29,13 @@ from airflow.models.dag import DAG
 from airflow.operators.bash import BashOperator
 from airflow.providers.google.cloud.operators.dataproc import DataprocCreateBatchOperator
 
+# mdm.config only needs stdlib + PyYAML (both present in this image); mdm.pipeline pulls in
+# pandas, which it does not have -- so the scale-tier cutoff is read from config here rather
+# than via load_thresholds().
+from mdm.config import load_config
+
+SCALE_THRESHOLDS = load_config()["thresholds"]["scale"]
+
 PROJECT = os.environ["GCP_PROJECT"]
 REGION = os.environ.get("GCP_REGION", "us-central1")
 BUCKET = os.environ["GCS_BUCKET"]
@@ -114,12 +121,12 @@ with DAG(
                 "32",
                 "--max-executors",
                 "7",
-                # 20.5, NOT config/matching.yml's dev/ci-tier value: the same FS score is
-                # far less precise at 5M records than at 50K (Phase 14 finding), so the
-                # scale-tier auto-match cutoff is measured separately. See the comment on
-                # thresholds in config/matching.yml and docs/design-decisions.md.
+                # config/matching.yml owns this now (thresholds.scale.upper): the same FS
+                # score is far less precise at 5M records than at 50K (Phase 14 finding),
+                # so the scale-tier cutoff is measured separately -- but it lives in config
+                # with the other tiers rather than being duplicated here and in the Makefile.
                 "--upper-threshold",
-                "20.5",
+                str(SCALE_THRESHOLDS["upper"]),
                 "--max-cluster-size",
                 "6",
                 "--min-cluster-density",
@@ -133,7 +140,7 @@ with DAG(
         task_id="crosswalk_survivorship",
         bash_command=(
             "python /opt/airflow/mdm-scripts/run_matching_bigquery.py "
-            f"--project {PROJECT} --run-id dedup_dag__{{{{ run_id }}}}"
+            f"--project {PROJECT} --tier scale --run-id dedup_dag__{{{{ run_id }}}}"
         ),
         env=SCRIPT_ENV,
         append_env=True,

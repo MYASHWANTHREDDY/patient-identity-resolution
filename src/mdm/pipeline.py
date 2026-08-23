@@ -76,6 +76,7 @@ def _load_existing_crosswalk(con: duckdb.DuckDBPyConnection) -> dict[str, Crossw
 def run_matching(
     db_path: str,
     *,
+    tier: str,
     run_id: str | None = None,
     fs_params: dict | None = None,
     nickname_index: dict[str, str] | None = None,
@@ -102,7 +103,7 @@ def run_matching(
         candidate_pairs = con.execute(
             "SELECT DISTINCT record_key_a, record_key_b FROM matching.candidate_pairs"
         ).df()
-        thresholds = load_thresholds()
+        thresholds = load_thresholds(tier)
 
         records_by_key = patient_normalized.set_index("record_key").to_dict(orient="index")
         for key, record in records_by_key.items():
@@ -245,6 +246,7 @@ def asymmetric_candidate_pairs(con, domains=MATCHPATH_DOMAINS, *, max_block_size
 def run_matchpath_matching(
     db_path: str,
     *,
+    tier: str,
     fs_params: dict | None = None,
     nickname_index: dict[str, str] | None = None,
     max_block_size: int | None = None,
@@ -261,7 +263,7 @@ def run_matchpath_matching(
 
     fs_params = fs_params if fs_params is not None else load_fs_params()
     nickname_index = nickname_index if nickname_index is not None else load_nickname_index()
-    thresholds = load_thresholds()
+    thresholds = load_thresholds(tier)
     if max_block_size is None:
         max_block_size = int(load_config()["blocking"]["max_block_size"])
 
@@ -495,6 +497,7 @@ def resolve_new_record(
     db_path: str,
     record: dict,
     *,
+    tier: str,
     run_id: str | None = None,
     fs_params: dict | None = None,
     nickname_index: dict[str, str] | None = None,
@@ -523,7 +526,7 @@ def resolve_new_record(
     run_id = run_id or datetime.now(UTC).isoformat()
     fs_params = fs_params if fs_params is not None else load_fs_params()
     nickname_index = nickname_index if nickname_index is not None else load_nickname_index()
-    thresholds = load_thresholds()
+    thresholds = load_thresholds(tier)
 
     normalized = _normalize_input_record(record)
 
@@ -811,13 +814,18 @@ def load_nickname_index() -> dict[str, str]:
     return build_nickname_index(table)
 
 
-def load_thresholds() -> dict:
+def load_thresholds(tier: str) -> dict:
+    """`tier` is required, never defaulted: the threshold is a property of the population
+    size (see config/matching.yml's `thresholds` comment), so a caller that doesn't know
+    its own tier cannot pick a correct cutoff. A KeyError on an unknown tier is intended --
+    silently falling back to another tier's value is the defect this signature prevents."""
     from mdm.config import load_config
 
     config = load_config()
+    tier_thresholds = config["thresholds"][tier]
     return {
-        "upper": config["thresholds"]["upper"],
-        "lower": config["thresholds"]["lower"],
+        "upper": tier_thresholds["upper"],
+        "lower": tier_thresholds["lower"],
         "max_cluster_size": config["clustering"]["max_cluster_size"],
         "min_cluster_density": config["clustering"]["min_cluster_density"],
         "survivorship_rule_chain": config["survivorship"]["rule_chain"],
